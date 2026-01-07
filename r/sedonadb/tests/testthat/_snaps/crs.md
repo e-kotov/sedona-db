@@ -1,7 +1,7 @@
 # sd_parse_crs works for GeoArrow metadata with EPSG
 
     Code
-      sedonadb:::sd_parse_crs(meta)
+      sd_parse_crs(meta)
     Output
       $authority_code
       [1] "EPSG:5070"
@@ -19,7 +19,7 @@
 # sd_parse_crs works for Engineering CRS (no EPSG ID)
 
     Code
-      sedonadb:::sd_parse_crs(meta)
+      sd_parse_crs(meta)
     Output
       $authority_code
       NULL
@@ -37,21 +37,21 @@
 # sd_parse_crs returns NULL if crs field is missing
 
     Code
-      sedonadb:::sd_parse_crs("{\"something_else\": 123}")
+      sd_parse_crs("{\"something_else\": 123}")
     Output
       NULL
 
 ---
 
     Code
-      sedonadb:::sd_parse_crs("{}")
+      sd_parse_crs("{}")
     Output
       NULL
 
 # sd_parse_crs handles invalid JSON gracefully
 
     Code
-      sedonadb:::sd_parse_crs("invalid json")
+      sd_parse_crs("invalid json")
     Condition
       Error:
       ! Failed to parse metadata JSON: expected value at line 1 column 1
@@ -59,7 +59,7 @@
 # sd_parse_crs works with plain strings if that's what's in 'crs'
 
     Code
-      sedonadb:::sd_parse_crs(meta)
+      sd_parse_crs(meta)
     Output
       $authority_code
       [1] "OGC:CRS84"
@@ -147,7 +147,7 @@
 # sd_parse_crs handles empty string
 
     Code
-      sedonadb:::sd_parse_crs("")
+      sd_parse_crs("")
     Condition
       Error:
       ! Failed to parse metadata JSON: EOF while parsing a value at line 1 column 0
@@ -155,7 +155,7 @@
 # sd_parse_crs handles CRS with only name, no ID
 
     Code
-      sedonadb:::sd_parse_crs(meta)
+      sd_parse_crs(meta)
     Output
       $authority_code
       NULL
@@ -173,7 +173,7 @@
 # sd_parse_crs handles OGC:CRS84
 
     Code
-      sedonadb:::sd_parse_crs(meta)
+      sd_parse_crs(meta)
     Output
       $authority_code
       [1] "OGC:CRS84"
