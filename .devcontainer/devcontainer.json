@@ -22,5 +22,8 @@
       ]
     }
   },
+  "mounts": [
+    "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached"
+  ],
   "postCreateCommand": "sudo apt-get update && sudo apt-get install -y cmake clang lld pkg-config libgeos-dev libproj-dev && Rscript -e \"install.packages('pak'); pak::local_install_deps('r/sedonadb')\""
 }

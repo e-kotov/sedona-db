@@ -35,7 +35,7 @@ CARGO_BUILD_ARGS = --lib --profile $(PROFILE) $(FEATURE_FLAGS) --manifest-path=.
 # on upstream so that we can remove this.
 CFLAGS_TWEAKED = $(CFLAGS) -Wno-pedantic
 
-all: $(SHLIB) clean_intermediate
+all: $(SHLIB)
 
 $(SHLIB): $(STATLIB)
 
