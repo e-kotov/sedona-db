@@ -1,0 +1,26 @@
+{
+  "name": "SedonaDB Dev",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/rocker-org/devcontainer-features/r-rig:1": {
+      "version": "release",
+      "vscodeRSupport": "minimal",
+      "installDevTools": true,
+      "installRadian": true
+    },
+    "ghcr.io/devcontainers/features/rust:1": {}
+  },
+  "remoteEnv": {
+    "PKG_SYSREQS": "true"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "REditorSupport.r",
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ]
+    }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y cmake clang lld pkg-config libgeos-dev libproj-dev && Rscript -e \"install.packages('pak'); pak::local_install_deps('r/sedonadb')\""
+}
