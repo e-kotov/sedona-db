@@ -392,7 +392,13 @@ impl DisplayColumn {
     pub fn header(&self, options: &DisplayTableOptions) -> Cell {
         // Don't print the type ever if it's a continuation column
         let is_continuation = self.name == "…" || self.name == "...";
-        let display_type = self.sedona_type.logical_type_name();
+        let display_type = match &self.sedona_type {
+            SedonaType::Wkb(_, Some(crs)) | SedonaType::WkbView(_, Some(crs)) => {
+                format!("{}({})", self.sedona_type.logical_type_name(), crs)
+            }
+            _ => self.sedona_type.logical_type_name(),
+        };
+
         if options.arrow_options.types_info() && !is_continuation {
             Cell::new(format!("{}\n{}", self.name, display_type)).set_delimiter('\0')
         } else {

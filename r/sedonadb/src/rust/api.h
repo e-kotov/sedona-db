@@ -1,40 +1,15 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//   http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing,
-// software distributed under the License is distributed on an
-// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
-// KIND, either express or implied.  See the License for the
-// specific language governing permissions and limitations
-// under the License.
-
-SEXP savvy_configure_proj_shared__ffi(SEXP c_arg__shared_library_path,
-                                      SEXP c_arg__database_path,
-                                      SEXP c_arg__search_path);
-SEXP savvy_init_r_runtime__ffi(DllInfo *c_arg___dll_info);
-SEXP savvy_init_r_runtime_interrupts__ffi(SEXP c_arg__interrupts_call,
-                                          SEXP c_arg__pkg_env);
-SEXP savvy_parse_crs_metadata__ffi(SEXP c_arg__crs_json);
+SEXP savvy_configure_proj_shared__ffi(SEXP c_arg__shared_library_path, SEXP c_arg__database_path, SEXP c_arg__search_path);
+SEXP savvy_init_r_runtime__ffi(DllInfo* c_arg___dll_info);
+SEXP savvy_init_r_runtime_interrupts__ffi(SEXP c_arg__interrupts_call, SEXP c_arg__pkg_env);
 SEXP savvy_sedonadb_adbc_init_func__ffi(void);
 
 // methods and associated functions for InternalContext
-SEXP savvy_InternalContext_data_frame_from_array_stream__ffi(
-    SEXP self__, SEXP c_arg__stream_xptr, SEXP c_arg__collect_now);
-SEXP savvy_InternalContext_data_frame_from_table_provider__ffi(
-    SEXP self__, SEXP c_arg__provider_xptr);
-SEXP savvy_InternalContext_deregister_table__ffi(SEXP self__,
-                                                 SEXP c_arg__table_ref);
+SEXP savvy_InternalContext_data_frame_from_array_stream__ffi(SEXP self__, SEXP c_arg__stream_xptr, SEXP c_arg__collect_now);
+SEXP savvy_InternalContext_data_frame_from_table_provider__ffi(SEXP self__, SEXP c_arg__provider_xptr);
+SEXP savvy_InternalContext_deregister_table__ffi(SEXP self__, SEXP c_arg__table_ref);
 SEXP savvy_InternalContext_new__ffi(void);
 SEXP savvy_InternalContext_read_parquet__ffi(SEXP self__, SEXP c_arg__paths);
-SEXP savvy_InternalContext_register_scalar_udf__ffi(
-    SEXP self__, SEXP c_arg__scalar_udf_xptr);
+SEXP savvy_InternalContext_register_scalar_udf__ffi(SEXP self__, SEXP c_arg__scalar_udf_xptr);
 SEXP savvy_InternalContext_scalar_udf_xptr__ffi(SEXP self__, SEXP c_arg__name);
 SEXP savvy_InternalContext_sql__ffi(SEXP self__, SEXP c_arg__query);
 SEXP savvy_InternalContext_view__ffi(SEXP self__, SEXP c_arg__table_ref);
@@ -45,26 +20,19 @@ SEXP savvy_InternalDataFrame_compute__ffi(SEXP self__, SEXP c_arg__ctx);
 SEXP savvy_InternalDataFrame_count__ffi(SEXP self__);
 SEXP savvy_InternalDataFrame_limit__ffi(SEXP self__, SEXP c_arg__n);
 SEXP savvy_InternalDataFrame_primary_geometry_column_index__ffi(SEXP self__);
-SEXP savvy_InternalDataFrame_select_indices__ffi(SEXP self__, SEXP c_arg__names,
-                                                 SEXP c_arg__indices);
-SEXP savvy_InternalDataFrame_show__ffi(SEXP self__, SEXP c_arg__ctx,
-                                       SEXP c_arg__width_chars,
-                                       SEXP c_arg__ascii, SEXP c_arg__limit);
+SEXP savvy_InternalDataFrame_select_indices__ffi(SEXP self__, SEXP c_arg__names, SEXP c_arg__indices);
+SEXP savvy_InternalDataFrame_show__ffi(SEXP self__, SEXP c_arg__ctx, SEXP c_arg__width_chars, SEXP c_arg__ascii, SEXP c_arg__limit);
 SEXP savvy_InternalDataFrame_to_arrow_schema__ffi(SEXP self__, SEXP c_arg__out);
-SEXP savvy_InternalDataFrame_to_arrow_stream__ffi(
-    SEXP self__, SEXP c_arg__out, SEXP c_arg__requested_schema_xptr);
-SEXP savvy_InternalDataFrame_to_parquet__ffi(
-    SEXP self__, SEXP c_arg__ctx, SEXP c_arg__path, SEXP c_arg__partition_by,
-    SEXP c_arg__sort_by, SEXP c_arg__single_file_output,
-    SEXP c_arg__overwrite_bbox_columns, SEXP c_arg__geoparquet_version);
+SEXP savvy_InternalDataFrame_to_arrow_stream__ffi(SEXP self__, SEXP c_arg__out, SEXP c_arg__requested_schema_xptr);
+SEXP savvy_InternalDataFrame_to_parquet__ffi(SEXP self__, SEXP c_arg__ctx, SEXP c_arg__path, SEXP c_arg__partition_by, SEXP c_arg__sort_by, SEXP c_arg__single_file_output, SEXP c_arg__overwrite_bbox_columns, SEXP c_arg__geoparquet_version);
 SEXP savvy_InternalDataFrame_to_provider__ffi(SEXP self__);
-SEXP savvy_InternalDataFrame_to_view__ffi(SEXP self__, SEXP c_arg__ctx,
-                                          SEXP c_arg__table_ref,
-                                          SEXP c_arg__overwrite);
+SEXP savvy_InternalDataFrame_to_view__ffi(SEXP self__, SEXP c_arg__ctx, SEXP c_arg__table_ref, SEXP c_arg__overwrite);
 
 // methods and associated functions for RSedonaCrs
 SEXP savvy_RSedonaCrs_authority_code__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_definition__ffi(SEXP self__);
 SEXP savvy_RSedonaCrs_display__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_name__ffi(SEXP self__);
 SEXP savvy_RSedonaCrs_srid__ffi(SEXP self__);
 SEXP savvy_RSedonaCrs_to_crs_string__ffi(SEXP self__);
 SEXP savvy_RSedonaCrs_to_json__ffi(SEXP self__);
@@ -84,18 +52,9 @@ SEXP savvy_SedonaDBExpr_display__ffi(SEXP self__);
 SEXP savvy_SedonaDBExpr_negate__ffi(SEXP self__);
 
 // methods and associated functions for SedonaDBExprFactory
-SEXP savvy_SedonaDBExprFactory_aggregate_function__ffi(SEXP self__,
-                                                       SEXP c_arg__name,
-                                                       SEXP c_arg__args,
-                                                       SEXP c_arg__na_rm,
-                                                       SEXP c_arg__distinct);
-SEXP savvy_SedonaDBExprFactory_binary__ffi(SEXP self__, SEXP c_arg__op,
-                                           SEXP c_arg__lhs, SEXP c_arg__rhs);
-SEXP savvy_SedonaDBExprFactory_column__ffi(SEXP self__, SEXP c_arg__name,
-                                           SEXP c_arg__qualifier);
-SEXP savvy_SedonaDBExprFactory_literal__ffi(SEXP c_arg__array_xptr,
-                                            SEXP c_arg__schema_xptr);
+SEXP savvy_SedonaDBExprFactory_aggregate_function__ffi(SEXP self__, SEXP c_arg__name, SEXP c_arg__args, SEXP c_arg__na_rm, SEXP c_arg__distinct);
+SEXP savvy_SedonaDBExprFactory_binary__ffi(SEXP self__, SEXP c_arg__op, SEXP c_arg__lhs, SEXP c_arg__rhs);
+SEXP savvy_SedonaDBExprFactory_column__ffi(SEXP self__, SEXP c_arg__name, SEXP c_arg__qualifier);
+SEXP savvy_SedonaDBExprFactory_literal__ffi(SEXP c_arg__array_xptr, SEXP c_arg__schema_xptr);
 SEXP savvy_SedonaDBExprFactory_new__ffi(SEXP c_arg__ctx);
-SEXP savvy_SedonaDBExprFactory_scalar_function__ffi(SEXP self__,
-                                                    SEXP c_arg__name,
-                                                    SEXP c_arg__args);
+SEXP savvy_SedonaDBExprFactory_scalar_function__ffi(SEXP self__, SEXP c_arg__name, SEXP c_arg__args);

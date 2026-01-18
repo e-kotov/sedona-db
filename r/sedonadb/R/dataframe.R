@@ -325,35 +325,50 @@ print.sedonadb_dataframe <- function(x, ..., width = NULL, n = NULL) {
   schema <- nanoarrow::infer_nanoarrow_schema(x)
   ncols <- length(schema$children)
 
-  cat(sprintf("# A sedonadb_dataframe: ? x %d\n", ncols))
+  if (is.null(width)) {
+    width <- getOption("width")
+  }
 
-  # Print geometry column info using SedonaTypeR wrapper
-  geo_col_info <- character()
+  col_suffix <- if (ncols == 1) "" else "s"
+  cat(sprintf("# A sedonadb_dataframe with ? rows and %d column%s\n", ncols, col_suffix))
+
+  # Identifies geometry/geography columns
+  geo_cols <- list()
   for (col_name in names(schema$children)) {
     child <- schema$children[[col_name]]
-    sd_type <- tryCatch(
-      RSedonaType$new(child),
-      error = function(e) NULL
-    )
+    sd_type <- tryCatch(RSedonaType$new(child), error = function(e) NULL)
     if (!is.null(sd_type)) {
       logical_type <- sd_type$logical_type_name()
       if (logical_type == "geometry" || logical_type == "geography") {
-        crs_display <- sd_type$crs_display()
-        geo_col_info <- c(geo_col_info, sprintf("%s%s", col_name, crs_display))
+        geo_cols[[col_name]] <- sd_type
       }
     }
   }
 
-  if (length(geo_col_info) > 0) {
-    if (is.null(width)) {
-      width <- getOption("width")
+  if (length(geo_cols) == 1) {
+    col_name <- names(geo_cols)[1]
+    sd_type <- geo_cols[[1]]
+    crs <- tryCatch(sd_type$crs(), error = function(e) NULL)
+    cat(sprintf("# Geometry column: %s\n", col_name))
+    if (!is.null(crs)) {
+      crs_line <- sprintf("# CRS:             %s", crs$display())
+      if (nchar(crs_line) > width) {
+        crs_line <- paste0(substr(crs_line, 1, width - 3), "...")
+      }
+      cat(paste0(crs_line, "\n"))
     }
-
-    geo_line <- sprintf("# Geometry: %s", paste(geo_col_info, collapse = ", "))
-    if (nchar(geo_line) > width) {
-      geo_line <- paste0(substr(geo_line, 1, width - 3), "...")
+  } else if (length(geo_cols) > 1) {
+    cat(sprintf("# Geometry columns: %s\n", paste(names(geo_cols), collapse = ", ")))
+    for (col_name in names(geo_cols)) {
+      crs <- tryCatch(geo_cols[[col_name]]$crs(), error = function(e) NULL)
+      if (!is.null(crs)) {
+        crs_line <- sprintf("# CRS (%s): %s", col_name, crs$display())
+        if (nchar(crs_line) > width) {
+          crs_line <- paste0(substr(crs_line, 1, width - 3), "...")
+        }
+        cat(paste0(crs_line, "\n"))
+      }
     }
-    cat(paste0(geo_line, "\n"))
   }
 
   if (isTRUE(getOption("sedonadb.interactive", TRUE))) {

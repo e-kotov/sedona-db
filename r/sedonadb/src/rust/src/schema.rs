@@ -43,6 +43,27 @@ impl RSedonaCrs {
         savvy::Sexp::try_from(self.inner.to_crs_string().as_str())
     }
 
+    /// Get the name of the CRS if available
+    fn name(&self) -> savvy::Result<savvy::Sexp> {
+        let json_str = self.inner.to_json();
+        let val: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| savvy::Error::new(format!("Failed to parse CRS JSON: {e}")))?;
+        
+        match val.get("name").and_then(|v| v.as_str()) {
+            Some(name) => savvy::Sexp::try_from(name),
+            None => Ok(savvy::NullSexp.into())
+        }
+    }
+
+    /// Get a PROJ-compatible CRS string representation
+    ///
+    /// For authority codes, returns the authority string (e.g., "EPSG:4326", "OGC:CRS84").
+    /// For PROJJSON types, returns the full JSON representation.
+    /// This is NOT the same as OGC WKT format.
+    fn definition(&self) -> savvy::Result<savvy::Sexp> {
+        savvy::Sexp::try_from(self.inner.to_crs_string().as_str())
+    }
+
     /// Get a formatted display string (e.g., "EPSG:4326" or "{...}")
     fn display(&self) -> savvy::Result<savvy::Sexp> {
         let display = if let Ok(Some(auth)) = self.inner.to_authority_code() {
