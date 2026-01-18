@@ -12,7 +12,7 @@
       $name
       [1] "NAD83 / Conus Albers"
       
-      $proj_string
+      $definition
       [1] "{\"id\":{\"authority\":\"EPSG\",\"code\":5070},\"name\":\"NAD83 / Conus Albers\"}"
       
 
@@ -30,7 +30,7 @@
       $name
       [1] "Construction Site Local Grid"
       
-      $proj_string
+      $definition
       [1] "{\"coordinate_system\":{\"axis\":[{\"abbreviation\":\"N\",\"direction\":\"north\",\"name\":\"Northing\",\"unit\":\"metre\"},{\"abbreviation\":\"E\",\"direction\":\"east\",\"name\":\"Easting\",\"unit\":\"metre\"}],\"subtype\":\"Cartesian\"},\"datum\":{\"name\":\"Local Datum\",\"type\":\"EngineeringDatum\"},\"name\":\"Construction Site Local Grid\",\"type\":\"EngineeringCRS\"}"
       
 
@@ -70,7 +70,7 @@
       $name
       NULL
       
-      $proj_string
+      $definition
       [1] "OGC:CRS84"
       
 
@@ -144,14 +144,6 @@
       +-----------------------------+----------------------------+
       Preview of up to 0 row(s)
 
-# sd_parse_crs handles empty string
-
-    Code
-      sd_parse_crs("")
-    Condition
-      Error:
-      ! Failed to parse metadata JSON: EOF while parsing a value at line 1 column 0
-
 # sd_parse_crs handles CRS with only name, no ID
 
     Code
@@ -166,7 +158,7 @@
       $name
       [1] "Custom Geographic CRS"
       
-      $proj_string
+      $definition
       [1] "{\"name\":\"Custom Geographic CRS\",\"type\":\"GeographicCRS\"}"
       
 
@@ -184,7 +176,7 @@
       $name
       NULL
       
-      $proj_string
+      $definition
       [1] "OGC:CRS84"
       
 

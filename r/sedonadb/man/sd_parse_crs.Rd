@@ -11,7 +11,7 @@ sd_parse_crs(crs_json)
 }
 \value{
 A list with components: authority_code (e.g., "EPSG:5070"), srid (integer),
-name (character string with a human-readable CRS name), and proj_string (character
+name (character string with a human-readable CRS name), and definition (character
 string with the PROJ representation of the CRS), or \code{NULL} when no CRS
 information is available, when the \code{"crs"} field is not present in the
 metadata, or when parsing the CRS information fails.

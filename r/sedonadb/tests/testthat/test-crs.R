@@ -16,7 +16,10 @@
 # under the License.
 
 test_that("sd_parse_crs works for GeoArrow metadata with EPSG", {
-  meta <- '{"crs": {"id": {"authority": "EPSG", "code": 5070}, "name": "NAD83 / Conus Albers"}}'
+  meta <- paste0(
+    '{"crs": {"id": {"authority": "EPSG", "code": 5070},',
+    ' "name": "NAD83 / Conus Albers"}}'
+  )
   expect_snapshot(sd_parse_crs(meta))
 })
 
@@ -33,8 +36,18 @@ test_that("sd_parse_crs works for Engineering CRS (no EPSG ID)", {
       "coordinate_system": {
         "subtype": "Cartesian",
         "axis": [
-          {"name": "Northing", "abbreviation": "N", "direction": "north", "unit": "metre"},
-          {"name": "Easting", "abbreviation": "E", "direction": "east", "unit": "metre"}
+          {
+            "name": "Northing",
+            "abbreviation": "N",
+            "direction": "north",
+            "unit": "metre"
+          },
+          {
+            "name": "Easting",
+            "abbreviation": "E",
+            "direction": "east",
+            "unit": "metre"
+          }
         ]
       }
     }
@@ -43,13 +56,13 @@ test_that("sd_parse_crs works for Engineering CRS (no EPSG ID)", {
 })
 
 test_that("sd_parse_crs returns NULL if crs field is missing", {
-  expect_snapshot(sd_parse_crs('{"something_else": 123}'))
-  expect_snapshot(sd_parse_crs('{}'))
+  expect_snapshot(sd_parse_crs("{\"something_else\": 123}"))
+  expect_snapshot(sd_parse_crs("{}"))
 })
 
 test_that("sd_parse_crs handles invalid JSON gracefully", {
   expect_snapshot(
-    sd_parse_crs('invalid json'),
+    sd_parse_crs("invalid json"),
     error = TRUE
   )
 })
@@ -109,11 +122,8 @@ test_that("sd_parse_crs handles NULL input", {
   )
 })
 
-test_that("sd_parse_crs handles empty string", {
-  expect_snapshot(
-    sd_parse_crs(""),
-    error = TRUE
-  )
+test_that("sd_parse_crs returns NULL for empty crs", {
+  expect_null(sd_parse_crs(""))
 })
 
 test_that("sd_parse_crs handles CRS with only name, no ID", {

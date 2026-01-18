@@ -72,6 +72,11 @@ fn configure_proj_shared(
 
 #[savvy]
 fn parse_crs_metadata(crs_json: &str) -> savvy::Result<savvy::Sexp> {
+    // Return NULL for empty or whitespace-only input (no metadata = no CRS)
+    if crs_json.trim().is_empty() {
+        return Ok(savvy::NullSexp.into());
+    }
+
     use sedona_schema::crs::deserialize_crs_from_obj;
 
     // The input is GeoArrow extension metadata, which is a JSON object like:
@@ -91,13 +96,13 @@ fn parse_crs_metadata(crs_json: &str) -> savvy::Result<savvy::Sexp> {
                 let auth_code = crs_obj.to_authority_code().ok().flatten();
                 let srid = crs_obj.srid().ok().flatten();
                 let name = crs_val.get("name").and_then(|v| v.as_str());
-                let proj_string = crs_obj.to_crs_string();
+                let definition = crs_obj.to_crs_string();
 
                 let mut out = savvy::OwnedListSexp::new(4, true)?;
                 out.set_name(0, "authority_code")?;
                 out.set_name(1, "srid")?;
                 out.set_name(2, "name")?;
-                out.set_name(3, "proj_string")?;
+                out.set_name(3, "definition")?;
 
                 if let Some(auth_code) = auth_code {
                     out.set_value(0, savvy::Sexp::try_from(auth_code.as_str())?)?;
@@ -116,7 +121,7 @@ fn parse_crs_metadata(crs_json: &str) -> savvy::Result<savvy::Sexp> {
                 } else {
                     out.set_value(2, savvy::NullSexp)?;
                 }
-                out.set_value(3, savvy::Sexp::try_from(proj_string.as_str())?)?;
+                out.set_value(3, savvy::Sexp::try_from(definition.as_str())?)?;
 
                 Ok(out.into())
             }
