@@ -145,22 +145,22 @@ test_that("sd_parse_crs handles OGC:CRS84", {
 
 # Explicit tests for Rust wrappers to ensure uppercase casing
 
-test_that("SedonaTypeR$crs_display() uses uppercase authority codes", {
+test_that("RSedonaType$crs_display() uses uppercase authority codes", {
   df <- sd_sql("SELECT ST_SetSRID(ST_Point(1, 2), 4326) as geom")
   schema <- nanoarrow::infer_nanoarrow_schema(df)
-  sd_type <- SedonaTypeR$new(schema$children$geom)
+  sd_type <- RSedonaType$new(schema$children$geom)
   expect_snapshot(sd_type$crs_display())
 
   df5070 <- sd_sql("SELECT ST_SetSRID(ST_Point(1, 2), 5070) as geom")
-  sd_type5070 <- SedonaTypeR$new(
+  sd_type5070 <- RSedonaType$new(
     nanoarrow::infer_nanoarrow_schema(df5070)$children$geom
   )
   expect_snapshot(sd_type5070$crs_display())
 })
 
-test_that("SedonaCrsR$display() uses uppercase authority codes", {
+test_that("RSedonaCrs$display() uses uppercase authority codes", {
   df <- sd_sql("SELECT ST_SetSRID(ST_Point(1, 2), 4326) as geom")
-  sd_type <- SedonaTypeR$new(
+  sd_type <- RSedonaType$new(
     nanoarrow::infer_nanoarrow_schema(df)$children$geom
   )
   crs <- sd_type$crs()

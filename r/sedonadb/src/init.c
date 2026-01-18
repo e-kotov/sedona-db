@@ -217,28 +217,53 @@ SEXP savvy_InternalDataFrame_to_view__impl(SEXP self__, SEXP c_arg__ctx,
   return handle_result(res);
 }
 
-SEXP savvy_SedonaCrsR_authority_code__impl(SEXP self__) {
-  SEXP res = savvy_SedonaCrsR_authority_code__ffi(self__);
+SEXP savvy_RSedonaCrs_authority_code__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaCrs_authority_code__ffi(self__);
   return handle_result(res);
 }
 
-SEXP savvy_SedonaCrsR_display__impl(SEXP self__) {
-  SEXP res = savvy_SedonaCrsR_display__ffi(self__);
+SEXP savvy_RSedonaCrs_display__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaCrs_display__ffi(self__);
   return handle_result(res);
 }
 
-SEXP savvy_SedonaCrsR_srid__impl(SEXP self__) {
-  SEXP res = savvy_SedonaCrsR_srid__ffi(self__);
+SEXP savvy_RSedonaCrs_srid__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaCrs_srid__ffi(self__);
   return handle_result(res);
 }
 
-SEXP savvy_SedonaCrsR_to_crs_string__impl(SEXP self__) {
-  SEXP res = savvy_SedonaCrsR_to_crs_string__ffi(self__);
+SEXP savvy_RSedonaCrs_to_crs_string__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaCrs_to_crs_string__ffi(self__);
   return handle_result(res);
 }
 
-SEXP savvy_SedonaCrsR_to_json__impl(SEXP self__) {
-  SEXP res = savvy_SedonaCrsR_to_json__ffi(self__);
+SEXP savvy_RSedonaCrs_to_json__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaCrs_to_json__ffi(self__);
+  return handle_result(res);
+}
+
+SEXP savvy_RSedonaType_crs__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaType_crs__ffi(self__);
+  return handle_result(res);
+}
+
+SEXP savvy_RSedonaType_crs_display__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaType_crs_display__ffi(self__);
+  return handle_result(res);
+}
+
+SEXP savvy_RSedonaType_logical_type_name__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaType_logical_type_name__ffi(self__);
+  return handle_result(res);
+}
+
+SEXP savvy_RSedonaType_name__impl(SEXP self__) {
+  SEXP res = savvy_RSedonaType_name__ffi(self__);
+  return handle_result(res);
+}
+
+SEXP savvy_RSedonaType_new__impl(SEXP c_arg__schema_xptr) {
+  SEXP res = savvy_RSedonaType_new__ffi(c_arg__schema_xptr);
   return handle_result(res);
 }
 
@@ -311,31 +336,6 @@ SEXP savvy_SedonaDBExprFactory_scalar_function__impl(SEXP self__,
   return handle_result(res);
 }
 
-SEXP savvy_SedonaTypeR_crs__impl(SEXP self__) {
-  SEXP res = savvy_SedonaTypeR_crs__ffi(self__);
-  return handle_result(res);
-}
-
-SEXP savvy_SedonaTypeR_crs_display__impl(SEXP self__) {
-  SEXP res = savvy_SedonaTypeR_crs_display__ffi(self__);
-  return handle_result(res);
-}
-
-SEXP savvy_SedonaTypeR_logical_type_name__impl(SEXP self__) {
-  SEXP res = savvy_SedonaTypeR_logical_type_name__ffi(self__);
-  return handle_result(res);
-}
-
-SEXP savvy_SedonaTypeR_name__impl(SEXP self__) {
-  SEXP res = savvy_SedonaTypeR_name__ffi(self__);
-  return handle_result(res);
-}
-
-SEXP savvy_SedonaTypeR_new__impl(SEXP c_arg__schema_xptr) {
-  SEXP res = savvy_SedonaTypeR_new__ffi(c_arg__schema_xptr);
-  return handle_result(res);
-}
-
 static const R_CallMethodDef CallEntries[] = {
     {"savvy_configure_proj_shared__impl",
      (DL_FUNC)&savvy_configure_proj_shared__impl, 3},
@@ -387,15 +387,22 @@ static const R_CallMethodDef CallEntries[] = {
      (DL_FUNC)&savvy_InternalDataFrame_to_provider__impl, 1},
     {"savvy_InternalDataFrame_to_view__impl",
      (DL_FUNC)&savvy_InternalDataFrame_to_view__impl, 4},
-    {"savvy_SedonaCrsR_authority_code__impl",
-     (DL_FUNC)&savvy_SedonaCrsR_authority_code__impl, 1},
-    {"savvy_SedonaCrsR_display__impl", (DL_FUNC)&savvy_SedonaCrsR_display__impl,
+    {"savvy_RSedonaCrs_authority_code__impl",
+     (DL_FUNC)&savvy_RSedonaCrs_authority_code__impl, 1},
+    {"savvy_RSedonaCrs_display__impl", (DL_FUNC)&savvy_RSedonaCrs_display__impl,
      1},
-    {"savvy_SedonaCrsR_srid__impl", (DL_FUNC)&savvy_SedonaCrsR_srid__impl, 1},
-    {"savvy_SedonaCrsR_to_crs_string__impl",
-     (DL_FUNC)&savvy_SedonaCrsR_to_crs_string__impl, 1},
-    {"savvy_SedonaCrsR_to_json__impl", (DL_FUNC)&savvy_SedonaCrsR_to_json__impl,
+    {"savvy_RSedonaCrs_srid__impl", (DL_FUNC)&savvy_RSedonaCrs_srid__impl, 1},
+    {"savvy_RSedonaCrs_to_crs_string__impl",
+     (DL_FUNC)&savvy_RSedonaCrs_to_crs_string__impl, 1},
+    {"savvy_RSedonaCrs_to_json__impl", (DL_FUNC)&savvy_RSedonaCrs_to_json__impl,
      1},
+    {"savvy_RSedonaType_crs__impl", (DL_FUNC)&savvy_RSedonaType_crs__impl, 1},
+    {"savvy_RSedonaType_crs_display__impl",
+     (DL_FUNC)&savvy_RSedonaType_crs_display__impl, 1},
+    {"savvy_RSedonaType_logical_type_name__impl",
+     (DL_FUNC)&savvy_RSedonaType_logical_type_name__impl, 1},
+    {"savvy_RSedonaType_name__impl", (DL_FUNC)&savvy_RSedonaType_name__impl, 1},
+    {"savvy_RSedonaType_new__impl", (DL_FUNC)&savvy_RSedonaType_new__impl, 1},
     {"savvy_SedonaDBExpr_alias__impl", (DL_FUNC)&savvy_SedonaDBExpr_alias__impl,
      2},
     {"savvy_SedonaDBExpr_cast__impl", (DL_FUNC)&savvy_SedonaDBExpr_cast__impl,
@@ -418,13 +425,6 @@ static const R_CallMethodDef CallEntries[] = {
      (DL_FUNC)&savvy_SedonaDBExprFactory_new__impl, 1},
     {"savvy_SedonaDBExprFactory_scalar_function__impl",
      (DL_FUNC)&savvy_SedonaDBExprFactory_scalar_function__impl, 3},
-    {"savvy_SedonaTypeR_crs__impl", (DL_FUNC)&savvy_SedonaTypeR_crs__impl, 1},
-    {"savvy_SedonaTypeR_crs_display__impl",
-     (DL_FUNC)&savvy_SedonaTypeR_crs_display__impl, 1},
-    {"savvy_SedonaTypeR_logical_type_name__impl",
-     (DL_FUNC)&savvy_SedonaTypeR_logical_type_name__impl, 1},
-    {"savvy_SedonaTypeR_name__impl", (DL_FUNC)&savvy_SedonaTypeR_name__impl, 1},
-    {"savvy_SedonaTypeR_new__impl", (DL_FUNC)&savvy_SedonaTypeR_new__impl, 1},
     {NULL, NULL, 0}};
 
 void R_init_sedonadb(DllInfo *dll) {

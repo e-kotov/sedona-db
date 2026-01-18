@@ -356,48 +356,48 @@ class(`InternalDataFrame`) <- c(
   cat('sedonadb::InternalDataFrame\n')
 }
 
-### wrapper functions for SedonaCrsR
+### wrapper functions for RSedonaCrs
 
-`SedonaCrsR_authority_code` <- function(self) {
+`RSedonaCrs_authority_code` <- function(self) {
   function() {
-    .Call(savvy_SedonaCrsR_authority_code__impl, `self`)
+    .Call(savvy_RSedonaCrs_authority_code__impl, `self`)
   }
 }
 
-`SedonaCrsR_display` <- function(self) {
+`RSedonaCrs_display` <- function(self) {
   function() {
-    .Call(savvy_SedonaCrsR_display__impl, `self`)
+    .Call(savvy_RSedonaCrs_display__impl, `self`)
   }
 }
 
-`SedonaCrsR_srid` <- function(self) {
+`RSedonaCrs_srid` <- function(self) {
   function() {
-    .Call(savvy_SedonaCrsR_srid__impl, `self`)
+    .Call(savvy_RSedonaCrs_srid__impl, `self`)
   }
 }
 
-`SedonaCrsR_to_crs_string` <- function(self) {
+`RSedonaCrs_to_crs_string` <- function(self) {
   function() {
-    .Call(savvy_SedonaCrsR_to_crs_string__impl, `self`)
+    .Call(savvy_RSedonaCrs_to_crs_string__impl, `self`)
   }
 }
 
-`SedonaCrsR_to_json` <- function(self) {
+`RSedonaCrs_to_json` <- function(self) {
   function() {
-    .Call(savvy_SedonaCrsR_to_json__impl, `self`)
+    .Call(savvy_RSedonaCrs_to_json__impl, `self`)
   }
 }
 
-`.savvy_wrap_SedonaCrsR` <- function(ptr) {
+`.savvy_wrap_RSedonaCrs` <- function(ptr) {
   e <- new.env(parent = emptyenv())
   e$.ptr <- ptr
-  e$`authority_code` <- `SedonaCrsR_authority_code`(ptr)
-  e$`display` <- `SedonaCrsR_display`(ptr)
-  e$`srid` <- `SedonaCrsR_srid`(ptr)
-  e$`to_crs_string` <- `SedonaCrsR_to_crs_string`(ptr)
-  e$`to_json` <- `SedonaCrsR_to_json`(ptr)
+  e$`authority_code` <- `RSedonaCrs_authority_code`(ptr)
+  e$`display` <- `RSedonaCrs_display`(ptr)
+  e$`srid` <- `RSedonaCrs_srid`(ptr)
+  e$`to_crs_string` <- `RSedonaCrs_to_crs_string`(ptr)
+  e$`to_json` <- `RSedonaCrs_to_json`(ptr)
 
-  class(e) <- c("sedonadb::SedonaCrsR", "SedonaCrsR", "savvy_sedonadb__sealed")
+  class(e) <- c("sedonadb::RSedonaCrs", "RSedonaCrs", "savvy_sedonadb__sealed")
   e
 }
 
@@ -405,15 +405,74 @@ class(`InternalDataFrame`) <- c(
 #' R-exposed wrapper for CRS (Coordinate Reference System) introspection
 #'
 #' This wraps an Arc<dyn CoordinateReferenceSystem> and exposes its methods to R.
-`SedonaCrsR` <- new.env(parent = emptyenv())
+`RSedonaCrs` <- new.env(parent = emptyenv())
 
-### associated functions for SedonaCrsR
+### associated functions for RSedonaCrs
 
-class(`SedonaCrsR`) <- c("sedonadb::SedonaCrsR__bundle", "savvy_sedonadb__sealed")
+class(`RSedonaCrs`) <- c("sedonadb::RSedonaCrs__bundle", "savvy_sedonadb__sealed")
 
 #' @export
-`print.sedonadb::SedonaCrsR__bundle` <- function(x, ...) {
-  cat('sedonadb::SedonaCrsR\n')
+`print.sedonadb::RSedonaCrs__bundle` <- function(x, ...) {
+  cat('sedonadb::RSedonaCrs\n')
+}
+
+### wrapper functions for RSedonaType
+
+`RSedonaType_crs` <- function(self) {
+  function() {
+    .savvy_wrap_RSedonaCrs(.Call(savvy_RSedonaType_crs__impl, `self`))
+  }
+}
+
+`RSedonaType_crs_display` <- function(self) {
+  function() {
+    .Call(savvy_RSedonaType_crs_display__impl, `self`)
+  }
+}
+
+`RSedonaType_logical_type_name` <- function(self) {
+  function() {
+    .Call(savvy_RSedonaType_logical_type_name__impl, `self`)
+  }
+}
+
+`RSedonaType_name` <- function(self) {
+  function() {
+    .Call(savvy_RSedonaType_name__impl, `self`)
+  }
+}
+
+`.savvy_wrap_RSedonaType` <- function(ptr) {
+  e <- new.env(parent = emptyenv())
+  e$.ptr <- ptr
+  e$`crs` <- `RSedonaType_crs`(ptr)
+  e$`crs_display` <- `RSedonaType_crs_display`(ptr)
+  e$`logical_type_name` <- `RSedonaType_logical_type_name`(ptr)
+  e$`name` <- `RSedonaType_name`(ptr)
+
+  class(e) <- c("sedonadb::RSedonaType", "RSedonaType", "savvy_sedonadb__sealed")
+  e
+}
+
+
+#' R-exposed wrapper for SedonaType introspection
+#'
+#' This allows R code to inspect Arrow schema fields and determine
+#' if they are geometry types with CRS information.
+`RSedonaType` <- new.env(parent = emptyenv())
+
+### associated functions for RSedonaType
+
+`RSedonaType`$`new` <- function(`schema_xptr`) {
+  .savvy_wrap_RSedonaType(.Call(savvy_RSedonaType_new__impl, `schema_xptr`))
+}
+
+
+class(`RSedonaType`) <- c("sedonadb::RSedonaType__bundle", "savvy_sedonadb__sealed")
+
+#' @export
+`print.sedonadb::RSedonaType__bundle` <- function(x, ...) {
+  cat('sedonadb::RSedonaType\n')
 }
 
 ### wrapper functions for SedonaDBExpr
@@ -567,63 +626,4 @@ class(`SedonaDBExprFactory`) <- c(
 #' @export
 `print.sedonadb::SedonaDBExprFactory__bundle` <- function(x, ...) {
   cat('sedonadb::SedonaDBExprFactory\n')
-}
-
-### wrapper functions for SedonaTypeR
-
-`SedonaTypeR_crs` <- function(self) {
-  function() {
-    .savvy_wrap_SedonaCrsR(.Call(savvy_SedonaTypeR_crs__impl, `self`))
-  }
-}
-
-`SedonaTypeR_crs_display` <- function(self) {
-  function() {
-    .Call(savvy_SedonaTypeR_crs_display__impl, `self`)
-  }
-}
-
-`SedonaTypeR_logical_type_name` <- function(self) {
-  function() {
-    .Call(savvy_SedonaTypeR_logical_type_name__impl, `self`)
-  }
-}
-
-`SedonaTypeR_name` <- function(self) {
-  function() {
-    .Call(savvy_SedonaTypeR_name__impl, `self`)
-  }
-}
-
-`.savvy_wrap_SedonaTypeR` <- function(ptr) {
-  e <- new.env(parent = emptyenv())
-  e$.ptr <- ptr
-  e$`crs` <- `SedonaTypeR_crs`(ptr)
-  e$`crs_display` <- `SedonaTypeR_crs_display`(ptr)
-  e$`logical_type_name` <- `SedonaTypeR_logical_type_name`(ptr)
-  e$`name` <- `SedonaTypeR_name`(ptr)
-
-  class(e) <- c("sedonadb::SedonaTypeR", "SedonaTypeR", "savvy_sedonadb__sealed")
-  e
-}
-
-
-#' R-exposed wrapper for SedonaType introspection
-#'
-#' This allows R code to inspect Arrow schema fields and determine
-#' if they are geometry types with CRS information.
-`SedonaTypeR` <- new.env(parent = emptyenv())
-
-### associated functions for SedonaTypeR
-
-`SedonaTypeR`$`new` <- function(`schema_xptr`) {
-  .savvy_wrap_SedonaTypeR(.Call(savvy_SedonaTypeR_new__impl, `schema_xptr`))
-}
-
-
-class(`SedonaTypeR`) <- c("sedonadb::SedonaTypeR__bundle", "savvy_sedonadb__sealed")
-
-#' @export
-`print.sedonadb::SedonaTypeR__bundle` <- function(x, ...) {
-  cat('sedonadb::SedonaTypeR\n')
 }

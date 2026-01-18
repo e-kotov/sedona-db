@@ -62,12 +62,19 @@ SEXP savvy_InternalDataFrame_to_view__ffi(SEXP self__, SEXP c_arg__ctx,
                                           SEXP c_arg__table_ref,
                                           SEXP c_arg__overwrite);
 
-// methods and associated functions for SedonaCrsR
-SEXP savvy_SedonaCrsR_authority_code__ffi(SEXP self__);
-SEXP savvy_SedonaCrsR_display__ffi(SEXP self__);
-SEXP savvy_SedonaCrsR_srid__ffi(SEXP self__);
-SEXP savvy_SedonaCrsR_to_crs_string__ffi(SEXP self__);
-SEXP savvy_SedonaCrsR_to_json__ffi(SEXP self__);
+// methods and associated functions for RSedonaCrs
+SEXP savvy_RSedonaCrs_authority_code__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_display__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_srid__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_to_crs_string__ffi(SEXP self__);
+SEXP savvy_RSedonaCrs_to_json__ffi(SEXP self__);
+
+// methods and associated functions for RSedonaType
+SEXP savvy_RSedonaType_crs__ffi(SEXP self__);
+SEXP savvy_RSedonaType_crs_display__ffi(SEXP self__);
+SEXP savvy_RSedonaType_logical_type_name__ffi(SEXP self__);
+SEXP savvy_RSedonaType_name__ffi(SEXP self__);
+SEXP savvy_RSedonaType_new__ffi(SEXP c_arg__schema_xptr);
 
 // methods and associated functions for SedonaDBExpr
 SEXP savvy_SedonaDBExpr_alias__ffi(SEXP self__, SEXP c_arg__name);
@@ -92,10 +99,3 @@ SEXP savvy_SedonaDBExprFactory_new__ffi(SEXP c_arg__ctx);
 SEXP savvy_SedonaDBExprFactory_scalar_function__ffi(SEXP self__,
                                                     SEXP c_arg__name,
                                                     SEXP c_arg__args);
-
-// methods and associated functions for SedonaTypeR
-SEXP savvy_SedonaTypeR_crs__ffi(SEXP self__);
-SEXP savvy_SedonaTypeR_crs_display__ffi(SEXP self__);
-SEXP savvy_SedonaTypeR_logical_type_name__ffi(SEXP self__);
-SEXP savvy_SedonaTypeR_name__ffi(SEXP self__);
-SEXP savvy_SedonaTypeR_new__ffi(SEXP c_arg__schema_xptr);

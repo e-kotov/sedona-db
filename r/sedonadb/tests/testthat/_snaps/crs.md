@@ -180,7 +180,7 @@
       [1] "OGC:CRS84"
       
 
-# SedonaTypeR$crs_display() uses uppercase authority codes
+# RSedonaType$crs_display() uses uppercase authority codes
 
     Code
       sd_type$crs_display()
@@ -194,7 +194,7 @@
     Output
       [1] " (CRS: EPSG:5070)"
 
-# SedonaCrsR$display() uses uppercase authority codes
+# RSedonaCrs$display() uses uppercase authority codes
 
     Code
       crs$display()

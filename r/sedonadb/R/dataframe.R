@@ -332,7 +332,7 @@ print.sedonadb_dataframe <- function(x, ..., width = NULL, n = NULL) {
   for (col_name in names(schema$children)) {
     child <- schema$children[[col_name]]
     sd_type <- tryCatch(
-      SedonaTypeR$new(child),
+      RSedonaType$new(child),
       error = function(e) NULL
     )
     if (!is.null(sd_type)) {
