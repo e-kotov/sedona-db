@@ -152,4 +152,131 @@ const char* SedonaMetalIndexGetLastError(void* index) {
     }
 }
 
+// ============================================================================
+// Metal Spatial Refiner C-ABI Implementations
+// ============================================================================
+
+#import "spatial_refiner.hpp"
+
+static thread_local std::string g_last_refiner_error;
+
+int SedonaMetalRefinerCreate(void** out_refiner) {
+    if (!out_refiner) return -1;
+    try {
+        auto* refiner = new MetalSpatialRefiner();
+        *out_refiner = static_cast<void*>(refiner);
+        return 0;
+    } catch (const std::exception& e) {
+        g_last_refiner_error = e.what();
+        *out_refiner = nullptr;
+        return -1;
+    } catch (...) {
+        g_last_refiner_error = "Unknown exception in refiner constructor";
+        *out_refiner = nullptr;
+        return -1;
+    }
 }
+
+int SedonaMetalRefinerPushPolygons(
+    void* refiner,
+    const void* polys, uint32_t poly_count,
+    const void* parts, uint32_t part_count,
+    const void* rings, uint32_t ring_count,
+    const void* vertices, uint32_t vertex_count)
+{
+    if (!refiner) return -1;
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        ref->push_polygons(
+            static_cast<const PolygonRecord*>(polys), poly_count,
+            static_cast<const PartRecord*>(parts), part_count,
+            static_cast<const RingRecord*>(rings), ring_count,
+            static_cast<const Point2D*>(vertices), vertex_count);
+        return 0;
+    } catch (...) {
+        return -2;
+    }
+}
+
+int SedonaMetalRefinerFinish(void* refiner) {
+    if (!refiner) return -1;
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        ref->finish_building();
+        return 0;
+    } catch (...) {
+        return -2;
+    }
+}
+
+int SedonaMetalRefinerRefine(
+    void* refiner,
+    const void* points, uint32_t point_count,
+    const uint32_t* candidate_build_indices,
+    const uint32_t* candidate_probe_indices,
+    uint32_t candidate_count,
+    uint8_t* out_states)
+{
+    if (!refiner) return -1;
+    if (candidate_count > 0 && (!candidate_build_indices || !candidate_probe_indices || !out_states)) return -2;
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        ref->refine(
+            static_cast<const DecomposedPoint*>(points), point_count,
+            candidate_build_indices,
+            candidate_probe_indices,
+            candidate_count,
+            out_states);
+        return 0;
+    } catch (...) {
+        return -3;
+    }
+}
+
+int SedonaMetalRefinerClear(void* refiner) {
+    if (!refiner) return -1;
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        ref->clear();
+        return 0;
+    } catch (...) {
+        return -2;
+    }
+}
+
+void SedonaMetalRefinerFree(void* refiner) {
+    if (refiner) {
+        try {
+            delete static_cast<MetalSpatialRefiner*>(refiner);
+        } catch (...) {
+        }
+    }
+}
+
+const char* SedonaMetalRefinerGetLastError(void* refiner) {
+    if (!refiner) {
+        if (!g_last_refiner_error.empty()) {
+            return g_last_refiner_error.c_str();
+        }
+        return "Refiner handle is null";
+    }
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        return ref->get_last_error();
+    } catch (...) {
+        return "Internal exception reading last error";
+    }
+}
+
+const char* SedonaMetalRefinerGetDeviceName(void* refiner) {
+    if (!refiner) return "None";
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        return ref->get_device_name();
+    } catch (...) {
+        return "Unknown";
+    }
+}
+
+}
+

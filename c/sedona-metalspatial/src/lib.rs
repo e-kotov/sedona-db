@@ -15,6 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+pub mod flattener;
+pub mod refine;
+
+pub use refine::{ContainerSide, MetalSpatialRefiner};
+
 #[cfg(target_os = "macos")]
 pub mod ffi {
     use std::ffi::c_void;
@@ -35,6 +40,29 @@ pub mod ffi {
         pub fn SedonaMetalIndexFree(index: *mut c_void);
         pub fn SedonaMetalIndexClear(index: *mut c_void) -> i32;
         pub fn SedonaMetalIndexGetLastError(index: *mut c_void) -> *const std::ffi::c_char;
+
+        // Refiner FFI
+        pub fn SedonaMetalRefinerCreate(out_refiner: *mut *mut c_void) -> i32;
+        pub fn SedonaMetalRefinerPushPolygons(
+            refiner: *mut c_void,
+            polys: *const c_void, poly_count: u32,
+            parts: *const c_void, part_count: u32,
+            rings: *const c_void, ring_count: u32,
+            vertices: *const c_void, vertex_count: u32,
+        ) -> i32;
+        pub fn SedonaMetalRefinerFinish(refiner: *mut c_void) -> i32;
+        pub fn SedonaMetalRefinerRefine(
+            refiner: *mut c_void,
+            points: *const c_void, point_count: u32,
+            candidate_build_indices: *const u32,
+            candidate_probe_indices: *const u32,
+            candidate_count: u32,
+            out_states: *mut u8,
+        ) -> i32;
+        pub fn SedonaMetalRefinerClear(refiner: *mut c_void) -> i32;
+        pub fn SedonaMetalRefinerFree(refiner: *mut c_void);
+        pub fn SedonaMetalRefinerGetLastError(refiner: *mut c_void) -> *const std::ffi::c_char;
+        pub fn SedonaMetalRefinerGetDeviceName(refiner: *mut c_void) -> *const std::ffi::c_char;
     }
 }
 
@@ -52,9 +80,12 @@ pub enum MetalSpatialError {
     ClearFailed { code: i32, msg: String },
     #[error("Probe failed: code {code}: {msg}")]
     ProbeFailed { code: i32, msg: String },
+    #[error("Refiner execution failed: code {code}: {msg}")]
+    RefinerExecutionFailed { code: i32, msg: String },
     #[error("Null pointer or invalid state: {0}")]
     InvalidState(String),
 }
+
 
 pub struct MetalSpatialIndex {
     #[cfg(target_os = "macos")]

@@ -34,6 +34,28 @@ void SedonaMetalIndexFree(void* index);
 int SedonaMetalIndexClear(void* index);
 const char* SedonaMetalIndexGetLastError(void* index);
 
+// Metal Spatial Refiner C-ABI
+int SedonaMetalRefinerCreate(void** out_refiner);
+int SedonaMetalRefinerPushPolygons(
+    void* refiner,
+    const void* polys, uint32_t poly_count,
+    const void* parts, uint32_t part_count,
+    const void* rings, uint32_t ring_count,
+    const void* vertices, uint32_t vertex_count);
+int SedonaMetalRefinerFinish(void* refiner);
+int SedonaMetalRefinerRefine(
+    void* refiner,
+    const void* points, uint32_t point_count,
+    const uint32_t* candidate_build_indices,
+    const uint32_t* candidate_probe_indices,
+    uint32_t candidate_count,
+    uint8_t* out_states);
+int SedonaMetalRefinerClear(void* refiner);
+void SedonaMetalRefinerFree(void* refiner);
+const char* SedonaMetalRefinerGetLastError(void* refiner);
+const char* SedonaMetalRefinerGetDeviceName(void* refiner);
+
+
 #ifdef __cplusplus
 }
 #endif

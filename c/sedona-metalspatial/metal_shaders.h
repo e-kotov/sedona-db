@@ -329,138 +329,253 @@ static const char* REFINE_METAL_SOURCE = R"RAW_SHADER(
 // under the License.
 
 #include <metal_stdlib>
-#include "geom_types.hpp"
 using namespace metal;
 
-// 2D Line segment orientation:
-// Returns:
-//   1: q is strictly to the right of p1->p2
-//  -1: q is strictly to the left of p1->p2
-//   0: q is collinear with p1->p2
-inline int get_orientation(Point2D p1, Point2D p2, Point2D q) {
-    float d_x = q.x - p1.x;
-    float d_y = q.y - p1.y;
-    if (metal::abs(d_x) <= 1e-7f && metal::abs(d_y) <= 1e-7f) {
-        return 0;
-    }
-    float v1 = d_x * (p2.y - p1.y);
-    float v2 = (p2.x - p1.x) * d_y;
-    if (metal::abs(v1 - v2) <= 1e-7f) {
-        return 0;
-    }
-    return (v1 - v2 < 0.0f) ? -1 : 1;
-}
+#define STATE_OUTSIDE 0
+#define STATE_INSIDE 1
+#define STATE_UNCERTAIN 2
 
-// Check whether collinear point q lies within bounding box of segment (p1, p2)
-inline bool segment_covers(Point2D p1, Point2D p2, Point2D q) {
-    float min_x = metal::min(p1.x, p2.x) - 1e-6f;
-    float max_x = metal::max(p1.x, p2.x) + 1e-6f;
-    float min_y = metal::min(p1.y, p2.y) - 1e-6f;
-    float max_y = metal::max(p1.y, p2.y) + 1e-6f;
-    return (q.x >= min_x && q.x <= max_x && q.y >= min_y && q.y <= max_y);
-}
+struct Point2D {
+    float x;
+    float y;
+};
 
-// Locate point in a single linear ring using winding number algorithm
-inline PointLocation locate_point_in_ring(
-    Point2D p,
+struct CandidatePair {
+    uint32_t polygon_idx;
+    uint32_t point_idx;
+};
+
+struct PolygonRecord {
+    float min_x;
+    float min_y;
+    float max_x;
+    float max_y;
+    float origin_hi_x;
+    float origin_hi_y;
+    float origin_lo_x;
+    float origin_lo_y;
+    float eta_poly;
+    uint32_t part_start;
+    uint32_t part_count;
+    uint32_t is_valid;
+};
+
+struct PartRecord {
+    uint32_t ring_start;
+    uint32_t ring_count;
+};
+
+struct RingRecord {
+    uint32_t vertex_start;
+    uint32_t vertex_count;
+};
+
+struct DecomposedPoint {
+    float hi_x;
+    float hi_y;
+    float lo_x;
+    float lo_y;
+    uint32_t is_valid;
+    uint32_t _padding;
+};
+
+// Helper to evaluate a single linear ring against a probe point.
+// Uses ray-casting along the positive x-axis.
+// Adheres strictly to Section 2.3, 2.4, and 4.2 of design note v2.
+inline uint32_t evaluate_ring(
+    RingRecord ring,
     device const Point2D* vertices,
-    uint32_t start_idx,
-    uint32_t num_points)
+    float delta_x,
+    float delta_y,
+    float eta_k,
+    float u_flt)
 {
-    if (num_points < 3) return kPointOutside;
-
-    Point2D first_pt = vertices[start_idx];
-    Point2D last_pt = vertices[start_idx + num_points - 1];
-    bool is_closed = (first_pt.x == last_pt.x && first_pt.y == last_pt.y);
-    uint32_t num_segments = is_closed ? (num_points - 1) : num_points;
-
-    int wn = 0;
-
-    for (uint32_t i = 0; i < num_segments; ++i) {
-        Point2D p1 = vertices[start_idx + i];
-        Point2D p2 = vertices[start_idx + ((i + 1) % num_points)];
-
-        // Zero-length segments are ignored
-        if (p1.x == p2.x && p1.y == p2.y) continue;
-
-        int side = get_orientation(p1, p2, p);
-        if (side == 0) {
-            if (segment_covers(p1, p2, p)) {
-                return kPointBoundary;
-            }
-        }
-
-        bool is_rising = (p1.y <= p.y) && (p.y < p2.y) && (side == 1);
-        bool is_falling = (p2.y <= p.y) && (p.y < p1.y) && (side == -1);
-        wn += (is_rising ? 1 : 0) - (is_falling ? 1 : 0);
+    if (ring.vertex_count < 3) {
+        return STATE_UNCERTAIN;
     }
 
-    if (wn == 0) return kPointOutside;
-    return kPointInside;
+    uint32_t crossings = 0;
+    uint32_t n = ring.vertex_count;
+    uint32_t start = ring.vertex_start;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        Point2D v1 = vertices[start + i];
+        Point2D v2 = vertices[start + ((i + 1) % n)];
+
+        // Skip degenerate zero-length edges
+        if (v1.x == v2.x && v1.y == v2.y) {
+            continue;
+        }
+
+        // Relative coordinates: vector from probe point to vertex
+        float x1 = v1.x - delta_x;
+        float y1 = v1.y - delta_y;
+        float x2 = v2.x - delta_x;
+        float y2 = v2.y - delta_y;
+
+        // Section 2.4 Ray Straddle Vertex Protection:
+        // Conservative eta_k-band rule:
+        // If |y1| <= eta_k or |y2| <= eta_k, a vertex lies within the ambiguity band
+        // of the ray. Traps potential apex/vertex grazing to avoid false outside results.
+        if (metal::abs(y1) <= eta_k || metal::abs(y2) <= eta_k) {
+            return STATE_UNCERTAIN;
+        }
+
+        // Certified straddle check:
+        // Because |y1| > eta_k and |y2| > eta_k, signs are certified.
+        // Edge straddles y = 0 iff y1 and y2 have opposite signs.
+        bool straddles = (y1 > 0.0f) != (y2 > 0.0f);
+        if (!straddles) {
+            continue;
+        }
+
+        // Section 2.3 Determinant and Forward Error Bound:
+        float det = x1 * y2 - x2 * y1;
+
+        // Shewchuk's A-bound: eps_arith = (3 + 16u) * u * (|x1*y2| + |x2*y1|)
+        float eps_arith = (3.0f + 16.0f * u_flt) * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1));
+
+        // Input perturbation: eps_input = eta_k * (|x1| + |x2| + |y1| + |y2|) + 2 * eta_k^2
+        float sum_coords = metal::abs(x1) + metal::abs(x2) + metal::abs(y1) + metal::abs(y2);
+        float eps_input = eta_k * sum_coords + 2.0f * eta_k * eta_k;
+
+        // Total forward error bound with safety factor S = 2.0 (Section 2.3 D)
+        float bound_det = 2.0f * (eps_arith + eps_input);
+
+        // Ambiguous orientation check
+        if (metal::abs(det) <= bound_det) {
+            return STATE_UNCERTAIN;
+        }
+
+        // Section 4.2 (R5) Division-Free Certified Crossing Formula:
+        // Edge crosses positive x-axis iff sign(det) == sign(y2 - y1)
+        bool det_positive = (det > 0.0f);
+        bool dy_positive = ((y2 - y1) > 0.0f);
+        if (det_positive == dy_positive) {
+            crossings++;
+        }
+    }
+
+    return (crossings & 1) ? STATE_INSIDE : STATE_OUTSIDE;
 }
 
-// Exact point location in a polygon (outer ring + interior hole rings)
-inline PointLocation locate_point_in_polygon(
-    Point2D p,
-    PolygonGeom poly,
-    device const PolygonRing* rings,
-    device const Point2D* vertices)
-{
-    // 1. Check outer ring
-    PolygonRing outer = rings[poly.outer_ring_idx];
-    PointLocation outer_loc = locate_point_in_ring(p, vertices, outer.start_idx, outer.num_points);
-
-    if (outer_loc == kPointOutside) {
-        return kPointOutside;
-    }
-
-    PointLocation rloc = outer_loc;
-
-    // 2. Check interior rings (holes)
-    for (uint32_t h = 0; h < poly.num_interior_rings; ++h) {
-        PolygonRing hole = rings[poly.outer_ring_idx + 1 + h];
-        PointLocation hole_loc = locate_point_in_ring(p, vertices, hole.start_idx, hole.num_points);
-
-        if (hole_loc == kPointInside) {
-            // Inside a hole -> outside the polygon
-            return kPointOutside;
-        }
-        if (hole_loc == kPointBoundary) {
-            rloc = kPointBoundary;
-        }
-    }
-
-    return rloc;
-}
-
-// Stage 2 Geometric Refinement Kernel:
-// Dispatched with 1 thread per CandidatePair.
-// Points located inside outer ring and outside all holes are retained.
+// Stage 2 Robust Geometric Refinement Kernel:
+// Evaluates point-in-polygon containment for candidate pairs into 3 states:
+//   STATE_OUTSIDE (0), STATE_INSIDE (1), STATE_UNCERTAIN (2)
 kernel void point_in_polygon_refine(
-    device const CandidatePair* candidate_pairs  [[buffer(0)]],
-    device const PolygonGeom*   polygons         [[buffer(1)]],
-    device const PolygonRing*   rings            [[buffer(2)]],
-    device const Point2D*       vertices         [[buffer(3)]],
-    device const Point2D*       points           [[buffer(4)]],
-    device CandidatePair*       output_refined   [[buffer(5)]],
-    device atomic_uint*         refined_count    [[buffer(6)]],
-    constant uint&              num_candidates   [[buffer(7)]],
-    constant uint&              max_results      [[buffer(8)]],
-    uint                        thread_id        [[thread_position_in_grid]])
+    device const CandidatePair*   candidate_pairs  [[buffer(0)]],
+    device const PolygonRecord*   polygons         [[buffer(1)]],
+    device const PartRecord*      parts            [[buffer(2)]],
+    device const RingRecord*      rings            [[buffer(3)]],
+    device const Point2D*         vertices         [[buffer(4)]],
+    device const DecomposedPoint* points           [[buffer(5)]],
+    device uint8_t*               out_states       [[buffer(6)]],
+    constant uint32_t&            num_candidates   [[buffer(7)]],
+    constant uint32_t&            num_polygons     [[buffer(8)]],
+    uint                          thread_id        [[thread_position_in_grid]])
 {
     if (thread_id >= num_candidates) return;
 
     CandidatePair pair = candidate_pairs[thread_id];
-    PolygonGeom poly = polygons[pair.polygon_idx];
-    Point2D pt = points[pair.point_idx];
+    if (pair.polygon_idx >= num_polygons) {
+        out_states[thread_id] = STATE_UNCERTAIN;
+        return;
+    }
 
-    PointLocation loc = locate_point_in_polygon(pt, poly, rings, vertices);
+    PolygonRecord poly = polygons[pair.polygon_idx];
+    DecomposedPoint pt = points[pair.point_idx];
 
-    if (loc != kPointOutside) {
-        uint slot = atomic_fetch_add_explicit(refined_count, 1, memory_order_relaxed);
-        if (slot < max_results) {
-            output_refined[slot] = pair;
+    // Invalid/empty/NaN geometries are routed to uncertain
+    if (poly.is_valid == 0 || pt.is_valid == 0) {
+        out_states[thread_id] = STATE_UNCERTAIN;
+        return;
+    }
+
+    // Bounding box filter check
+    float px = pt.hi_x + pt.lo_x;
+    float py = pt.hi_y + pt.lo_y;
+    if (px < poly.min_x - poly.eta_poly || px > poly.max_x + poly.eta_poly ||
+        py < poly.min_y - poly.eta_poly || py > poly.max_y + poly.eta_poly)
+    {
+        out_states[thread_id] = STATE_OUTSIDE;
+        return;
+    }
+
+    // Section 2.2 step 4: Relative probe displacement Delta_tilde
+    float delta_hi_x = pt.hi_x - poly.origin_hi_x;
+    float delta_lo_x = pt.lo_x - poly.origin_lo_x;
+    float delta_x = delta_hi_x + delta_lo_x;
+
+    float delta_hi_y = pt.hi_y - poly.origin_hi_y;
+    float delta_lo_y = pt.lo_y - poly.origin_lo_y;
+    float delta_y = delta_hi_y + delta_lo_y;
+
+    // Section 2.3 & 2.4: Conservative eta_k calculation with S_eta = 2.0
+    float delta_norm_inf = metal::max(metal::abs(delta_x), metal::abs(delta_y));
+    float pt_norm_inf = metal::max(metal::abs(pt.hi_x), metal::abs(pt.hi_y));
+
+    constexpr float u_flt = 5.9604645e-8f;             // 2^-24
+    constexpr float two_neg_48_flt = 3.5527137e-15f;    // 2^-48
+
+    float eta = poly.eta_poly + 3.0f * u_flt * delta_norm_inf + two_neg_48_flt * pt_norm_inf;
+    float eta_k = 2.0f * eta; // S_eta = 2.0
+
+    // Section 4.2 MultiPolygon & Part combination rules:
+    bool any_part_inside = false;
+    bool any_part_uncertain = false;
+
+    for (uint32_t p = 0; p < poly.part_count; ++p) {
+        PartRecord part = parts[poly.part_start + p];
+        if (part.ring_count == 0) {
+            any_part_uncertain = true;
+            continue;
         }
+
+        // Exterior ring (index 0 of part)
+        RingRecord ext_ring = rings[part.ring_start];
+        uint32_t ext_state = evaluate_ring(ext_ring, vertices, delta_x, delta_y, eta_k, u_flt);
+
+        if (ext_state == STATE_OUTSIDE) {
+            continue;
+        }
+        if (ext_state == STATE_UNCERTAIN) {
+            any_part_uncertain = true;
+            continue;
+        }
+
+        // ext_state == STATE_INSIDE: Check interior rings (holes)
+        bool in_hole = false;
+        bool hole_uncertain = false;
+
+        for (uint32_t h = 1; h < part.ring_count; ++h) {
+            RingRecord hole_ring = rings[part.ring_start + h];
+            uint32_t hole_state = evaluate_ring(hole_ring, vertices, delta_x, delta_y, eta_k, u_flt);
+            if (hole_state == STATE_INSIDE) {
+                in_hole = true;
+                break;
+            }
+            if (hole_state == STATE_UNCERTAIN) {
+                hole_uncertain = true;
+            }
+        }
+
+        if (in_hole) {
+            continue;
+        }
+        if (hole_uncertain) {
+            any_part_uncertain = true;
+        } else {
+            any_part_inside = true;
+            break;
+        }
+    }
+
+    if (any_part_inside) {
+        out_states[thread_id] = STATE_INSIDE;
+    } else if (any_part_uncertain) {
+        out_states[thread_id] = STATE_UNCERTAIN;
+    } else {
+        out_states[thread_id] = STATE_OUTSIDE;
     }
 }
 

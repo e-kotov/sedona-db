@@ -64,6 +64,8 @@ static const char* REFINE_METAL_SOURCE = R"RAW_SHADER(
 fn main() {
     println!("cargo:rerun-if-changed=spatial_index.hpp");
     println!("cargo:rerun-if-changed=spatial_index.mm");
+    println!("cargo:rerun-if-changed=spatial_refiner.hpp");
+    println!("cargo:rerun-if-changed=spatial_refiner.mm");
     println!("cargo:rerun-if-changed=sedona_metalspatial_c.h");
     println!("cargo:rerun-if-changed=sedona_metalspatial_c.mm");
     println!("cargo:rerun-if-changed=geom_types.hpp");
@@ -82,8 +84,10 @@ fn main() {
             .flag("-fobjc-arc")
             .include(".")
             .file("spatial_index.mm")
+            .file("spatial_refiner.mm")
             .file("sedona_metalspatial_c.mm")
             .compile("sedona_metalspatial");
+
 
         println!("cargo:rustc-link-lib=framework=Metal");
         println!("cargo:rustc-link-lib=framework=Foundation");
