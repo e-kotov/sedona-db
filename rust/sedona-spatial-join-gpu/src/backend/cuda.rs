@@ -83,7 +83,7 @@ impl PlatformSpatialIndex {
     }
 
     pub fn finish_building(&mut self) -> Result<()> {
-        self.raw.finish_building().map_err(|e| {
+        self.raw.finish_building().map(|_| ()).map_err(|e| {
             DataFusionError::Execution(format!("Failed to build spatial index on GPU: {e:?}"))
         })
     }

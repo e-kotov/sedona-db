@@ -248,9 +248,10 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             ))
         })?;
 
-        if self.spatial_predicate.relation_type()
-            == sedona_spatial_join::spatial_predicate::SpatialRelationType::Intersects
-        {
+        if matches!(
+            &self.spatial_predicate,
+            SpatialPredicate::Relation(rel) if rel.relation_type == sedona_spatial_join::spatial_predicate::SpatialRelationType::Intersects
+        ) {
             let mut valid_polygons = 0;
             for batch in &self.indexed_batches {
                 for i in 0..batch.batch.num_rows() {
