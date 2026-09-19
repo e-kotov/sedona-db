@@ -22,6 +22,8 @@ on:
     branches:
       - main
       - metal-spatial-join
+      - draft/metal-spatial-join
+      - feat/metal-spatial-join
     paths:
       - 'c/sedona-metalspatial/**'
       - 'rust/sedona-spatial-join/**'
@@ -33,6 +35,8 @@ on:
     branches:
       - main
       - metal-spatial-join
+      - draft/metal-spatial-join
+      - feat/metal-spatial-join
     paths:
       - 'c/sedona-metalspatial/**'
       - 'rust/sedona-spatial-join/**'
