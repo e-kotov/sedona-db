@@ -41,5 +41,11 @@ wkb = { workspace = true }
 [dev-dependencies]
 robust = "1.2.0"
 wkt = { workspace = true }
+sedona-metalspatial = { path = ".", features = ["test-internals"] }
+
+[features]
+default = []
+test-internals = []
+
 
 

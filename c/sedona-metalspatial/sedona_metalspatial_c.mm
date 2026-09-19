@@ -161,15 +161,17 @@ const char* SedonaMetalIndexGetLastError(void* index) {
 static thread_local std::string g_last_refiner_error;
 
 int SedonaMetalRefinerCreate(void** out_refiner) {
-    return SedonaMetalRefinerCreateWithMode(out_refiner, 0);
-}
-
-int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode) {
     if (!out_refiner) return -1;
     try {
-        auto* refiner = new MetalSpatialRefiner(nil, bound_mode);
-        *out_refiner = static_cast<void*>(refiner);
-        return 0;
+        @autoreleasepool {
+#ifdef ENABLE_TEST_INTERNALS
+            auto* refiner = new MetalSpatialRefiner(nil, 0);
+#else
+            auto* refiner = new MetalSpatialRefiner(nil);
+#endif
+            *out_refiner = static_cast<void*>(refiner);
+            return 0;
+        }
     } catch (const std::exception& e) {
         g_last_refiner_error = e.what();
         *out_refiner = nullptr;
@@ -180,6 +182,27 @@ int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode) {
         return -1;
     }
 }
+
+#ifdef ENABLE_TEST_INTERNALS
+int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode) {
+    if (!out_refiner) return -1;
+    try {
+        @autoreleasepool {
+            auto* refiner = new MetalSpatialRefiner(nil, bound_mode);
+            *out_refiner = static_cast<void*>(refiner);
+            return 0;
+        }
+    } catch (const std::exception& e) {
+        g_last_refiner_error = e.what();
+        *out_refiner = nullptr;
+        return -1;
+    } catch (...) {
+        g_last_refiner_error = "Unknown exception in refiner constructor";
+        *out_refiner = nullptr;
+        return -1;
+    }
+}
+#endif
 
 int SedonaMetalRefinerPushPolygons(
     void* refiner,

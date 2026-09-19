@@ -78,15 +78,21 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        cc::Build::new()
+        let mut build = cc::Build::new();
+        build
             .cpp(true)
             .std("c++20")
             .flag("-fobjc-arc")
             .include(".")
             .file("spatial_index.mm")
             .file("spatial_refiner.mm")
-            .file("sedona_metalspatial_c.mm")
-            .compile("sedona_metalspatial");
+            .file("sedona_metalspatial_c.mm");
+
+        if std::env::var("CARGO_FEATURE_TEST_INTERNALS").is_ok() {
+            build.define("ENABLE_TEST_INTERNALS", "1");
+        }
+
+        build.compile("sedona_metalspatial");
 
 
         println!("cargo:rustc-link-lib=framework=Metal");

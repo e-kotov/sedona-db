@@ -30,7 +30,11 @@ typedef void* id;
 
 class MetalSpatialRefiner {
 public:
+#ifdef ENABLE_TEST_INTERNALS
     MetalSpatialRefiner(id device = nullptr, int bound_mode = 0);
+#else
+    MetalSpatialRefiner(id device = nullptr);
+#endif
     ~MetalSpatialRefiner();
 
     void clear();

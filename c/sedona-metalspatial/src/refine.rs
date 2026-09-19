@@ -45,12 +45,46 @@ pub struct MetalSpatialRefiner {
 impl MetalSpatialRefiner {
     /// Creates a new MetalSpatialRefiner instance on the default Metal device using certified v2 bound.
     pub fn try_new() -> Result<Self, MetalSpatialError> {
-        Self::try_new_with_mode(0)
+        let mut raw = std::ptr::null_mut();
+        let rc = unsafe { ffi::SedonaMetalRefinerCreate(&mut raw) };
+        if rc != 0 || raw.is_null() {
+            let msg = unsafe {
+                let ptr = ffi::SedonaMetalRefinerGetLastError(raw);
+                let err_str = if ptr.is_null() {
+                    "Refiner initialization failed".to_string()
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                };
+                if !raw.is_null() {
+                    ffi::SedonaMetalRefinerFree(raw);
+                }
+                err_str
+            };
+            return Err(MetalSpatialError::CreationFailed(msg));
+        }
+
+        let dev_name = unsafe {
+            let ptr = ffi::SedonaMetalRefinerGetDeviceName(raw);
+            if ptr.is_null() {
+                "Unknown Apple Silicon GPU".to_string()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        };
+
+        Ok(Self {
+            raw,
+            device_name: dev_name,
+            num_build_polygons: 0,
+        })
     }
 
     /// Internal/test constructor specifying bound mode:
     /// 0: certified v2 (default)
-    /// 1: flawed legacy v1 (for adversarial teeth testing)
+    /// 1: flawed legacy v1 det bound only
+    /// 2: band off only
+    /// 3: naive delta only
+    #[cfg(feature = "test-internals")]
     #[doc(hidden)]
     pub fn try_new_with_mode(bound_mode: i32) -> Result<Self, MetalSpatialError> {
         let mut raw = std::ptr::null_mut();

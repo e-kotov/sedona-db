@@ -6028,6 +6028,7 @@ dependencies = [
  "cc",
  "geo-traits",
  "robust",
+ "sedona-metalspatial",
  "thiserror 2.0.20",
  "wkb",
  "wkt 0.14.0",

@@ -21,7 +21,11 @@
 #include <stdexcept>
 #include <algorithm>
 
+#ifdef ENABLE_TEST_INTERNALS
 MetalSpatialRefiner::MetalSpatialRefiner(id device, int bound_mode)
+#else
+MetalSpatialRefiner::MetalSpatialRefiner(id device)
+#endif
     : device_(device),
       command_queue_(nil),
       pipeline_state_(nil),
@@ -52,7 +56,11 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device, int bound_mode)
         if (@available(macOS 15.0, *)) {
             options.mathMode = MTLMathModeSafe;
         }
+#ifdef ENABLE_TEST_INTERNALS
         options.preprocessorMacros = @{ @"BOUND_MODE": @(bound_mode) };
+#else
+        options.preprocessorMacros = @{ @"BOUND_MODE": @(0) };
+#endif
 
         NSError* error = nil;
         NSString* src = [NSString stringWithUTF8String:REFINE_METAL_SOURCE];
