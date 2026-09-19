@@ -33,4 +33,11 @@ cc = { version = "1.0" }
 [dependencies]
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+byteorder = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+robust = "1.2.0"
+wkb = { workspace = true }
+wkt = { workspace = true }
+

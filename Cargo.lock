@@ -6024,8 +6024,12 @@ version = "0.5.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "byteorder",
  "cc",
+ "robust",
  "thiserror 2.0.20",
+ "wkb",
+ "wkt 0.14.0",
 ]
 
 [[package]]

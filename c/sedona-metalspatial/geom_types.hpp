@@ -85,3 +85,44 @@ enum PointLocation : uint32_t {
     kPointBoundary = 1,
     kPointOutside = 2
 };
+
+// 3-state classification for robust geometric refiner
+#define STATE_OUTSIDE 0
+#define STATE_INSIDE 1
+#define STATE_UNCERTAIN 2
+
+// Flat multi-polygon hierarchy records matching design note v2
+struct PolygonRecord {
+    float min_x;
+    float min_y;
+    float max_x;
+    float max_y;
+    float origin_hi_x;
+    float origin_hi_y;
+    float origin_lo_x;
+    float origin_lo_y;
+    float eta_poly;
+    uint32_t part_start;
+    uint32_t part_count;
+    uint32_t is_valid; // 1 if polygon is valid and parsable, 0 if empty/NaN/invalid
+};
+
+struct PartRecord {
+    uint32_t ring_start;
+    uint32_t ring_count;
+};
+
+struct RingRecord {
+    uint32_t vertex_start;
+    uint32_t vertex_count;
+};
+
+struct DecomposedPoint {
+    float hi_x;
+    float hi_y;
+    float lo_x;
+    float lo_y;
+    uint32_t is_valid; // 1 if point is valid, 0 if empty/NaN/invalid
+    uint32_t _padding;
+};
+
