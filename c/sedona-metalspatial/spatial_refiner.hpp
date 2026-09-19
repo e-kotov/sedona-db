@@ -57,6 +57,8 @@ public:
 
     const char* get_last_error() const;
     const char* get_device_name() const;
+    uint64_t get_memory_usage() const;
+    void set_last_error(const std::string& err);
 
 private:
     void set_error(const std::string& err);
@@ -87,6 +89,7 @@ private:
     std::vector<Point2D> host_vertices_;
 
     bool is_built_;
+    uint64_t allocated_bytes_;
     std::string device_name_;
     mutable std::mutex error_mutex_;
     mutable std::string last_error_;

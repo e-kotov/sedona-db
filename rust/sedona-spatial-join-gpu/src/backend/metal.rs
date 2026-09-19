@@ -150,11 +150,18 @@ impl PlatformSpatialRefiner {
         }
     }
 
-    pub fn supports_predicate(predicate_name: &str) -> bool {
-        MetalSpatialRefiner::supports_predicate(predicate_name)
+    pub fn supports_predicate(relation: &SpatialRelationType) -> bool {
+        matches!(
+            relation,
+            SpatialRelationType::Contains
+                | SpatialRelationType::Covers
+                | SpatialRelationType::Within
+                | SpatialRelationType::CoveredBy
+                | SpatialRelationType::Intersects
+        )
     }
 
     pub fn get_refiner_mem_usage(&self) -> usize {
-        0
+        self.raw.get_memory_usage()
     }
 }

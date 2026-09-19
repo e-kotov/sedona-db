@@ -109,11 +109,13 @@ fn create_table(items: &[(i32, Option<&str>)], batch_size: usize) -> Result<Arc<
     Ok(Arc::new(MemTable::try_new(schema, vec![batches])?))
 }
 
-async fn assert_differential_query(
+async fn assert_differential_query_opts(
     left_table: Arc<MemTable>,
     right_table: Arc<MemTable>,
     sql: &str,
     batch_size: usize,
+    fallback_to_cpu: bool,
+    expect_gpu_provider: bool,
 ) -> Result<()> {
     // 1. Run CPU oracle query
     let ctx_cpu = setup_context(false, true, batch_size)?;
@@ -123,7 +125,7 @@ async fn assert_differential_query(
     let cpu_batches = df_cpu.collect().await?;
 
     // 2. Run GPU accelerated query
-    let ctx_gpu = setup_context(true, true, batch_size)?;
+    let ctx_gpu = setup_context(true, fallback_to_cpu, batch_size)?;
     ctx_gpu.register_table("L", left_table.clone())?;
     ctx_gpu.register_table("R", right_table.clone())?;
     let df_gpu = ctx_gpu.sql(sql).await?;
@@ -137,6 +139,13 @@ async fn assert_differential_query(
         "Physical plan must contain SpatialJoinExec, got:\n{}",
         plan_display
     );
+    if expect_gpu_provider {
+        assert!(
+            plan_display.contains("provider=Gpu"),
+            "Physical plan must use Gpu provider, got:\n{}",
+            plan_display
+        );
+    }
 
     let gpu_batches = df_gpu.collect().await?;
 
@@ -152,11 +161,22 @@ async fn assert_differential_query(
     Ok(())
 }
 
+async fn assert_differential_query(
+    left_table: Arc<MemTable>,
+    right_table: Arc<MemTable>,
+    sql: &str,
+    batch_size: usize,
+) -> Result<()> {
+    assert_differential_query_opts(left_table, right_table, sql, batch_size, false, true).await
+}
+
 // ---------------------------------------------------------------------------
 // 1. Predicates: ST_Contains, ST_Covers, ST_Within, ST_CoveredBy, ST_Intersects
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_metal_predicates() -> Result<()> {
+    sedona_spatial_join_gpu::reset_gpu_verified();
+
     let polygons = vec![
         (0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))")),
         (1, Some("POLYGON ((20 20, 30 20, 30 30, 20 30, 20 20))")),
@@ -188,6 +208,14 @@ async fn test_metal_predicates() -> Result<()> {
         "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Covers(L.geometry, R.geometry) ORDER BY l_id, r_id",
         10,
     ).await?;
+
+    // Assert that GPU refiner actually verified candidate points directly on GPU
+    let verified = sedona_spatial_join_gpu::total_gpu_verified();
+    assert!(
+        verified > 0,
+        "Expected GPU refiner to verify candidate points directly on Metal GPU, but verified={}",
+        verified
+    );
 
     // ST_Within (Point within Polygon)
     assert_differential_query(
@@ -512,7 +540,7 @@ async fn test_metal_planner_fallback() -> Result<()> {
     let sql = "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id";
 
     // 1. With fallback_to_cpu = true, query MUST succeed and match CPU oracle
-    assert_differential_query(left.clone(), right.clone(), sql, 10).await?;
+    assert_differential_query_opts(left.clone(), right.clone(), sql, 10, true, false).await?;
 
     // 2. With fallback_to_cpu = false, query planning MUST fail with error
     let ctx_no_fallback = setup_context(true, false, 10)?;

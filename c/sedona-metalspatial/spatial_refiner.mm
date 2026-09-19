@@ -33,7 +33,8 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device)
       buf_parts_(nil),
       buf_rings_(nil),
       buf_vertices_(nil),
-      is_built_(false)
+      is_built_(false),
+      allocated_bytes_(0)
 {
     @autoreleasepool {
         if (!device_) {
@@ -106,6 +107,14 @@ const char* MetalSpatialRefiner::get_device_name() const {
     return device_name_.c_str();
 }
 
+uint64_t MetalSpatialRefiner::get_memory_usage() const {
+    return allocated_bytes_;
+}
+
+void MetalSpatialRefiner::set_last_error(const std::string& err) {
+    set_error(err);
+}
+
 void MetalSpatialRefiner::clear() {
     @autoreleasepool {
         buf_polygons_ = nil;
@@ -119,6 +128,7 @@ void MetalSpatialRefiner::clear() {
         host_vertices_.clear();
 
         is_built_ = false;
+        allocated_bytes_ = 0;
         last_error_.clear();
     }
 }
@@ -198,6 +208,7 @@ void MetalSpatialRefiner::finish_building() {
             throw std::runtime_error("Metal buffer allocation failed");
         }
 
+        allocated_bytes_ = poly_size + part_size + ring_size + vert_size;
         is_built_ = true;
     }
 }

@@ -230,6 +230,7 @@ impl SpatialIndex for GPUSpatialIndex {
         verified_pairs.sort_unstable();
 
         let gpu_verified_count = verified_pairs.len();
+        crate::record_gpu_verified(gpu_verified_count);
         let cpu_resolved_count = cpu_resolved_pairs.len();
         let total_count = gpu_verified_count + cpu_resolved_count;
 

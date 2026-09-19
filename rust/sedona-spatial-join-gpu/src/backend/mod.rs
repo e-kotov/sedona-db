@@ -17,6 +17,9 @@
 
 //! Platform backend abstraction for GPU spatial join (CUDA and Apple Metal).
 
+#[cfg(all(feature = "gpu", feature = "metal"))]
+compile_error!("Features 'gpu' (CUDA) and 'metal' (Apple Silicon) are mutually exclusive and cannot be enabled simultaneously.");
+
 /// Outcome of geometric refinement on the GPU.
 #[derive(Debug, Default, Clone)]
 pub struct RefineOutcome {

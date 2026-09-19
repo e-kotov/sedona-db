@@ -50,7 +50,11 @@ int SedonaMetalIndexPushBuild(void* index, const float* rects, uint32_t count) {
             return -3;
         }
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error(e.what());
+        return -4;
     } catch (...) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error("Unknown C++ exception occurred");
         return -4;
     }
 }
@@ -63,7 +67,11 @@ int SedonaMetalIndexFinish(void* index) {
             return -2;
         }
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error(e.what());
+        return -3;
     } catch (...) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error("Unknown C++ exception occurred");
         return -3;
     }
 }
@@ -106,10 +114,17 @@ int SedonaMetalIndexProbe(void* index, const float* rects, uint32_t count,
             *out_probe = p_buf;
         }
         return 0;
+    } catch (const std::exception& e) {
+        if (out_build) *out_build = nullptr;
+        if (out_probe) *out_probe = nullptr;
+        if (out_len) *out_len = 0;
+        static_cast<MetalSpatialIndex*>(index)->set_last_error(e.what());
+        return -4;
     } catch (...) {
         if (out_build) *out_build = nullptr;
         if (out_probe) *out_probe = nullptr;
         if (out_len) *out_len = 0;
+        static_cast<MetalSpatialIndex*>(index)->set_last_error("Unknown C++ exception occurred");
         return -4;
     }
 }
@@ -137,7 +152,11 @@ int SedonaMetalIndexClear(void* index) {
         auto* idx = static_cast<MetalSpatialIndex*>(index);
         idx->clear();
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error(e.what());
+        return -2;
     } catch (...) {
+        static_cast<MetalSpatialIndex*>(index)->set_last_error("Unknown C++ exception occurred");
         return -2;
     }
 }
@@ -220,7 +239,11 @@ int SedonaMetalRefinerPushPolygons(
             static_cast<const RingRecord*>(rings), ring_count,
             static_cast<const Point2D*>(vertices), vertex_count);
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+        return -2;
     } catch (...) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
         return -2;
     }
 }
@@ -231,7 +254,11 @@ int SedonaMetalRefinerFinish(void* refiner) {
         auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
         ref->finish_building();
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+        return -2;
     } catch (...) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
         return -2;
     }
 }
@@ -255,7 +282,11 @@ int SedonaMetalRefinerRefine(
             candidate_count,
             out_states);
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+        return -3;
     } catch (...) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
         return -3;
     }
 }
@@ -266,7 +297,11 @@ int SedonaMetalRefinerClear(void* refiner) {
         auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
         ref->clear();
         return 0;
+    } catch (const std::exception& e) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+        return -2;
     } catch (...) {
+        static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
         return -2;
     }
 }
@@ -302,6 +337,16 @@ const char* SedonaMetalRefinerGetDeviceName(void* refiner) {
         return ref->get_device_name();
     } catch (...) {
         return "Unknown";
+    }
+}
+
+uint64_t SedonaMetalRefinerGetMemUsage(void* refiner) {
+    if (!refiner) return 0;
+    try {
+        auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+        return ref->get_memory_usage();
+    } catch (...) {
+        return 0;
     }
 }
 

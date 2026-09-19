@@ -141,6 +141,14 @@ impl MetalSpatialRefiner {
         }
     }
 
+    /// Returns the number of bytes allocated for polygon buffers on the GPU.
+    pub fn get_memory_usage(&self) -> usize {
+        if self.raw.is_null() {
+            return 0;
+        }
+        unsafe { ffi::SedonaMetalRefinerGetMemUsage(self.raw) as usize }
+    }
+
     /// Plan-time check called by physical planner.
     pub fn supports_predicate(predicate_name: &str) -> bool {
         matches!(

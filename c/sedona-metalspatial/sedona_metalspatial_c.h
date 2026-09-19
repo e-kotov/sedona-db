@@ -57,6 +57,7 @@ int SedonaMetalRefinerClear(void* refiner);
 void SedonaMetalRefinerFree(void* refiner);
 const char* SedonaMetalRefinerGetLastError(void* refiner);
 const char* SedonaMetalRefinerGetDeviceName(void* refiner);
+uint64_t SedonaMetalRefinerGetMemUsage(void* refiner);
 
 
 #ifdef __cplusplus

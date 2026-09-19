@@ -178,16 +178,16 @@ impl PlatformSpatialRefiner {
         }
     }
 
-    pub fn supports_predicate(predicate_name: &str) -> bool {
+    pub fn supports_predicate(relation: &SpatialRelationType) -> bool {
         matches!(
-            predicate_name,
-            "Intersects"
-                | "Contains"
-                | "Within"
-                | "Covers"
-                | "CoveredBy"
-                | "Touches"
-                | "Equals"
+            relation,
+            SpatialRelationType::Intersects
+                | SpatialRelationType::Contains
+                | SpatialRelationType::Within
+                | SpatialRelationType::Covers
+                | SpatialRelationType::CoveredBy
+                | SpatialRelationType::Touches
+                | SpatialRelationType::Equals
         )
     }
 

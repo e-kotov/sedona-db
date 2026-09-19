@@ -31,7 +31,7 @@ rust-version.workspace = true
 result_large_err = "allow"
 
 [features]
-gpu = ["sedona-libgpuspatial/gpu"]
+gpu = ["dep:sedona-libgpuspatial", "sedona-libgpuspatial/gpu"]
 metal = ["dep:sedona-metalspatial"]
 
 [dependencies]
@@ -50,7 +50,7 @@ sedona-schema = { workspace = true }
 sedona-functions = { workspace = true }
 sedona-geometry = { workspace = true }
 sedona-spatial-join = { workspace = true }
-sedona-libgpuspatial = { workspace = true }
+sedona-libgpuspatial = { workspace = true, optional = true }
 sedona-metalspatial = { workspace = true, optional = true }
 sedona-query-planner = { workspace = true }
 futures = { workspace = true }

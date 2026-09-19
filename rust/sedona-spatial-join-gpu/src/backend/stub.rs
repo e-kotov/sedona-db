@@ -89,7 +89,7 @@ impl PlatformSpatialRefiner {
         Err(DataFusionError::NotImplemented("GPU spatial refiner stub".to_string()))
     }
 
-    pub fn supports_predicate(_predicate_name: &str) -> bool {
+    pub fn supports_predicate(_relation: &sedona_spatial_join::spatial_predicate::SpatialRelationType) -> bool {
         false
     }
 

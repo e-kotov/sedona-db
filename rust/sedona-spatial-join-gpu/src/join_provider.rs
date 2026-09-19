@@ -87,6 +87,10 @@ impl SpatialJoinProvider for GpuSpatialJoinProvider {
     fn evaluated_array_factory(&self) -> Arc<dyn EvaluatedGeometryArrayFactory> {
         Arc::new(DefaultGeometryArrayFactory)
     }
+
+    fn name(&self) -> &str {
+        "Gpu"
+    }
 }
 
 #[derive(Debug)]

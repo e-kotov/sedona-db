@@ -65,6 +65,7 @@ pub mod ffi {
         pub fn SedonaMetalRefinerFree(refiner: *mut c_void);
         pub fn SedonaMetalRefinerGetLastError(refiner: *mut c_void) -> *const std::ffi::c_char;
         pub fn SedonaMetalRefinerGetDeviceName(refiner: *mut c_void) -> *const std::ffi::c_char;
+        pub fn SedonaMetalRefinerGetMemUsage(refiner: *mut c_void) -> u64;
     }
 }
 

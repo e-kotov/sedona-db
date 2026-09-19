@@ -197,6 +197,11 @@ impl SpatialJoinExec {
         self.projection.is_some()
     }
 
+    /// Access the underlying spatial join provider
+    pub fn join_provider(&self) -> &Arc<dyn SpatialJoinProvider> {
+        &self.join_provider
+    }
+
     /// Returns a new `ExecutionPlan` that runs NestedLoopsJoins with the left
     /// and right inputs swapped.
     ///
@@ -342,10 +347,15 @@ impl DisplayAs for SpatialJoinExec {
                 } else {
                     "".to_string()
                 };
+                let display_provider = if self.join_provider.name() == "Cpu" {
+                    "".to_string()
+                } else {
+                    format!(", provider={}", self.join_provider.name())
+                };
                 write!(
                     f,
-                    "SpatialJoinExec: join_type={:?}{}{}{}",
-                    self.join_type, display_on, display_filter, display_projections
+                    "SpatialJoinExec: join_type={:?}{}{}{}{}",
+                    self.join_type, display_on, display_filter, display_projections, display_provider
                 )
             }
             DisplayFormatType::TreeRender => {
