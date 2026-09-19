@@ -54,3 +54,7 @@ dev/release/.env
 
 /.luarc.json
 .positai
+
+# Local development and experiments
+private/
+c/sedona-metalspatial/poc_metal

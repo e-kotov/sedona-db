@@ -1,0 +1,34 @@
+name: metal-poc
+
+on:
+  push:
+    branches:
+      - metal-spatial-join
+    paths:
+      - 'c/sedona-metalspatial/**'
+      - '.github/workflows/metal-poc.yml'
+  pull_request:
+    branches:
+      - metal-spatial-join
+    paths:
+      - 'c/sedona-metalspatial/**'
+      - '.github/workflows/metal-poc.yml'
+  workflow_dispatch:
+
+jobs:
+  test-metal-apple-silicon:
+    name: "Metal POC on Apple Silicon"
+    runs-on: macos-15  # Apple Silicon M-series runner with native Metal GPU access
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Metal Spatial Filter
+        working-directory: c/sedona-metalspatial
+        run: |
+          make
+
+      - name: Run Metal GPU Spatial Filter
+        working-directory: c/sedona-metalspatial
+        run: |
+          ./poc_metal
