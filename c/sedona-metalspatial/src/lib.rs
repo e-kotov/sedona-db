@@ -33,6 +33,7 @@ pub mod ffi {
         ) -> i32;
         pub fn SedonaMetalIndexFreeResults(out_build: *mut u32, out_probe: *mut u32);
         pub fn SedonaMetalIndexFree(index: *mut c_void);
+        pub fn SedonaMetalIndexClear(index: *mut c_void) -> i32;
         pub fn SedonaMetalIndexGetLastError(index: *mut c_void) -> *const std::ffi::c_char;
     }
 }
@@ -47,6 +48,8 @@ pub enum MetalSpatialError {
     PushBuildFailed { code: i32, msg: String },
     #[error("Failed to finish building index: code {code}: {msg}")]
     FinishFailed { code: i32, msg: String },
+    #[error("Failed to clear index: code {code}: {msg}")]
+    ClearFailed { code: i32, msg: String },
     #[error("Probe failed: code {code}: {msg}")]
     ProbeFailed { code: i32, msg: String },
     #[error("Null pointer or invalid state: {0}")]
@@ -130,6 +133,18 @@ impl MetalSpatialIndex {
         Ok(())
     }
 
+    pub fn clear(&mut self) -> Result<(), MetalSpatialError> {
+        if self.raw.is_null() {
+            return Err(MetalSpatialError::InvalidState("Index is null".to_string()));
+        }
+        let rc = unsafe { ffi::SedonaMetalIndexClear(self.raw) };
+        if rc != 0 {
+            let msg = self.last_error();
+            return Err(MetalSpatialError::ClearFailed { code: rc, msg });
+        }
+        Ok(())
+    }
+
     pub fn probe(&self, rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>), MetalSpatialError> {
         if self.raw.is_null() {
             return Err(MetalSpatialError::InvalidState("Index is null".to_string()));
@@ -201,6 +216,10 @@ impl MetalSpatialIndex {
     }
 
     pub fn finish_building(&mut self) -> Result<(), MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn clear(&mut self) -> Result<(), MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
     }
 

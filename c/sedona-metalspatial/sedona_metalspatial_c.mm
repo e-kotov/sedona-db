@@ -131,6 +131,17 @@ void SedonaMetalIndexFree(void* index) {
     }
 }
 
+int SedonaMetalIndexClear(void* index) {
+    if (!index) return -1;
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        idx->clear();
+        return 0;
+    } catch (...) {
+        return -2;
+    }
+}
+
 const char* SedonaMetalIndexGetLastError(void* index) {
     if (!index) return "Index handle is null";
     try {

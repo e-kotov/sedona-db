@@ -1,4 +1,22 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 #import "spatial_index.hpp"
+#import "metal_shaders.h"
 #import <Metal/Metal.h>
 #include <iostream>
 #include <vector>
@@ -7,248 +25,6 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
-
-// MSL Source for Hardware Ray Tracing BVH
-static const char* BVH_METAL_SOURCE = R"(
-#include <metal_stdlib>
-#include <metal_raytracing>
-
-using namespace metal;
-using namespace metal::raytracing;
-
-struct BoundingBox {
-    float xmin;
-    float ymin;
-    float xmax;
-    float ymax;
-};
-
-struct MatchPair {
-    uint build_idx;
-    uint probe_idx;
-};
-
-inline bool is_valid_box(BoundingBox b) {
-    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
-             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
-             b.xmin > b.xmax || b.ymin > b.ymax);
-}
-
-kernel void rt_probe_points(
-    primitive_acceleration_structure accel        [[buffer(0)]],
-    device const BoundingBox*        build_boxes  [[buffer(1)]],
-    device const BoundingBox*        probe_boxes  [[buffer(2)]],
-    device MatchPair*                output_pairs [[buffer(3)]],
-    device atomic_uint*              match_count  [[buffer(4)]],
-    constant uint&                   num_probes   [[buffer(5)]],
-    constant uint&                   max_results  [[buffer(6)]],
-    constant uint&                   probe_offset [[buffer(7)]],
-    uint                             tid          [[thread_position_in_grid]])
-{
-    if (tid >= num_probes) return;
-
-    uint probe_idx = probe_offset + tid;
-    BoundingBox probe = probe_boxes[probe_idx];
-    if (!is_valid_box(probe)) return;
-
-    float px = probe.xmin;
-    float py = probe.ymin;
-
-    ray r;
-    r.origin = float3(px, py, -1.0f);
-    r.direction = float3(0.0f, 0.0f, 1.0f);
-    r.min_distance = 0.0f;
-    r.max_distance = 2.0f;
-
-    intersection_query<> q(r, accel);
-    while (q.next()) {
-        if (q.get_candidate_intersection_type() == intersection_type::bounding_box) {
-            uint build_id = q.get_candidate_primitive_id();
-            BoundingBox b = build_boxes[build_id];
-            if (is_valid_box(b) && px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
-                uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
-                if (slot < max_results) {
-                    output_pairs[slot] = MatchPair{build_id, probe_idx};
-                }
-            }
-        }
-    }
-}
-)";
-
-// MSL Source for Fast Compute Hierarchical Grid Index
-static const char* SPATIAL_HASH_METAL_SOURCE = R"(
-#include <metal_stdlib>
-using namespace metal;
-
-struct BoundingBox {
-    float xmin;
-    float ymin;
-    float xmax;
-    float ymax;
-};
-
-struct MatchPair {
-    uint build_idx;
-    uint probe_idx;
-};
-
-struct GridLevelParams {
-    float cell_w;
-    float cell_h;
-    uint  grid_dim;
-    uint  cell_offset;
-};
-
-struct HierarchicalGridParams {
-    float min_x;
-    float min_y;
-    uint  num_levels;
-    uint  num_build;
-    uint  num_probe;
-    uint  probe_offset;
-    uint  max_results;
-    GridLevelParams levels[4];
-};
-
-inline bool is_valid_box(BoundingBox b) {
-    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
-             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
-             b.xmin > b.xmax || b.ymin > b.ymax);
-}
-
-inline bool boxes_intersect(BoundingBox a, BoundingBox b) {
-    if (!is_valid_box(a) || !is_valid_box(b)) return false;
-    return !(a.xmax < b.xmin || a.xmin > b.xmax || a.ymax < b.ymin || a.ymin > b.ymax);
-}
-
-inline void get_level_cell_range(BoundingBox b, constant HierarchicalGridParams& p, uint level,
-                                 thread int& min_cx, thread int& max_cx,
-                                 thread int& min_cy, thread int& max_cy)
-{
-    constant GridLevelParams& lp = p.levels[level];
-    min_cx = clamp(int((b.xmin - p.min_x) / lp.cell_w), 0, int(lp.grid_dim - 1));
-    max_cx = clamp(int((b.xmax - p.min_x) / lp.cell_w), 0, int(lp.grid_dim - 1));
-    min_cy = clamp(int((b.ymin - p.min_y) / lp.cell_h), 0, int(lp.grid_dim - 1));
-    max_cy = clamp(int((b.ymax - p.min_y) / lp.cell_h), 0, int(lp.grid_dim - 1));
-}
-
-inline uint select_level_for_box(BoundingBox b, constant HierarchicalGridParams& p) {
-    // Select the finest level where box covers at most 4 cells
-    for (int lvl = int(p.num_levels - 1); lvl > 0; --lvl) {
-        int min_cx, max_cx, min_cy, max_cy;
-        get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
-        int count = (max_cx - min_cx + 1) * (max_cy - min_cy + 1);
-        if (count <= 4) {
-            return lvl;
-        }
-    }
-    return 0;
-}
-
-kernel void count_cell_entries(
-    device const BoundingBox*             boxes       [[buffer(0)]],
-    device atomic_uint*                   cell_counts [[buffer(1)]],
-    constant HierarchicalGridParams&      p           [[buffer(2)]],
-    uint                                  tid         [[thread_position_in_grid]])
-{
-    if (tid >= p.num_build) return;
-    BoundingBox b = boxes[tid];
-    if (!is_valid_box(b)) return;
-
-    uint lvl = select_level_for_box(b, p);
-    constant GridLevelParams& lp = p.levels[lvl];
-
-    int min_cx, max_cx, min_cy, max_cy;
-    get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
-
-    for (int y = min_cy; y <= max_cy; ++y) {
-        for (int x = min_cx; x <= max_cx; ++x) {
-            uint cell_idx = lp.cell_offset + y * lp.grid_dim + x;
-            atomic_fetch_add_explicit(&cell_counts[cell_idx], 1, memory_order_relaxed);
-        }
-    }
-}
-
-kernel void populate_cells(
-    device const BoundingBox*             boxes        [[buffer(0)]],
-    device atomic_uint*                   cell_heads   [[buffer(1)]],
-    device const uint*                    cell_offsets [[buffer(2)]],
-    device uint*                          cell_entries [[buffer(3)]],
-    constant HierarchicalGridParams&      p            [[buffer(4)]],
-    uint                                  tid          [[thread_position_in_grid]])
-{
-    if (tid >= p.num_build) return;
-    BoundingBox b = boxes[tid];
-    if (!is_valid_box(b)) return;
-
-    uint lvl = select_level_for_box(b, p);
-    constant GridLevelParams& lp = p.levels[lvl];
-
-    int min_cx, max_cx, min_cy, max_cy;
-    get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
-
-    for (int y = min_cy; y <= max_cy; ++y) {
-        for (int x = min_cx; x <= max_cx; ++x) {
-            uint cell_idx = lp.cell_offset + y * lp.grid_dim + x;
-            uint slot = atomic_fetch_add_explicit(&cell_heads[cell_idx], 1, memory_order_relaxed);
-            cell_entries[cell_offsets[cell_idx] + slot] = tid;
-        }
-    }
-}
-
-kernel void probe_grid(
-    device const BoundingBox*             build_boxes  [[buffer(0)]],
-    device const BoundingBox*             probe_boxes  [[buffer(1)]],
-    device const uint*                    cell_offsets [[buffer(2)]],
-    device const uint*                    cell_entries [[buffer(3)]],
-    device MatchPair*                     output_pairs [[buffer(4)]],
-    device atomic_uint*                   match_count  [[buffer(5)]],
-    constant HierarchicalGridParams&      p            [[buffer(6)]],
-    uint                                  tid          [[thread_position_in_grid]])
-{
-    if (tid >= p.num_probe || p.num_build == 0) return;
-    uint probe_idx = p.probe_offset + tid;
-    BoundingBox probe = probe_boxes[probe_idx];
-    if (!is_valid_box(probe)) return;
-
-    for (uint lvl = 0; lvl < p.num_levels; ++lvl) {
-        constant GridLevelParams& lp = p.levels[lvl];
-        float max_grid_x = p.min_x + lp.cell_w * float(lp.grid_dim);
-        float max_grid_y = p.min_y + lp.cell_h * float(lp.grid_dim);
-        if (probe.xmax < p.min_x || probe.xmin > max_grid_x ||
-            probe.ymax < p.min_y || probe.ymin > max_grid_y) {
-            continue;
-        }
-
-        int p_min_cx, p_max_cx, p_min_cy, p_max_cy;
-        get_level_cell_range(probe, p, lvl, p_min_cx, p_max_cx, p_min_cy, p_max_cy);
-
-        for (int cy = p_min_cy; cy <= p_max_cy; ++cy) {
-            for (int cx = p_min_cx; cx <= p_max_cx; ++cx) {
-                uint cell_idx = lp.cell_offset + cy * lp.grid_dim + cx;
-                uint start = cell_offsets[cell_idx];
-                uint end = cell_offsets[cell_idx + 1];
-
-                for (uint i = start; i < end; ++i) {
-                    uint build_id = cell_entries[i];
-                    BoundingBox build = build_boxes[build_id];
-                    if (boxes_intersect(build, probe)) {
-                        int b_min_cx, b_max_cx, b_min_cy, b_max_cy;
-                        get_level_cell_range(build, p, lvl, b_min_cx, b_max_cx, b_min_cy, b_max_cy);
-                        if (cx == max(p_min_cx, b_min_cx) && cy == max(p_min_cy, b_min_cy)) {
-                            uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
-                            if (slot < p.max_results) {
-                                output_pairs[slot] = MatchPair{build_id, probe_idx};
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-)";
 
 inline bool is_valid_box(const BoundingBox& b) {
     return !(std::isnan(b.xmin) || std::isnan(b.ymin) || std::isnan(b.xmax) || std::isnan(b.ymax) ||
@@ -383,10 +159,13 @@ struct MetalSpatialIndex::Impl {
                     mtl_boxes[i].max = MTLPackedFloat3Make(0.0f, 0.0f, 11.0f);
                     continue;
                 }
-                float dx = std::max(1e-4f, (b.xmax - b.xmin) * 1e-4f + std::abs(b.xmax) * 1e-6f);
-                float dy = std::max(1e-4f, (b.ymax - b.ymin) * 1e-4f + std::abs(b.ymax) * 1e-6f);
-                mtl_boxes[i].min = MTLPackedFloat3Make(b.xmin - dx, b.ymin - dy, -0.5f);
-                mtl_boxes[i].max = MTLPackedFloat3Make(b.xmax + dx, b.ymax + dy, 0.5f);
+                // Symmetric nextafter-based expansion to prevent grazing ray misses across any coordinate scale
+                float xmin_pad = std::nextafterf(std::nextafterf(b.xmin, -INFINITY), -INFINITY);
+                float xmax_pad = std::nextafterf(std::nextafterf(b.xmax, INFINITY), INFINITY);
+                float ymin_pad = std::nextafterf(std::nextafterf(b.ymin, -INFINITY), -INFINITY);
+                float ymax_pad = std::nextafterf(std::nextafterf(b.ymax, INFINITY), INFINITY);
+                mtl_boxes[i].min = MTLPackedFloat3Make(xmin_pad, ymin_pad, -0.5f);
+                mtl_boxes[i].max = MTLPackedFloat3Make(xmax_pad, ymax_pad, 0.5f);
             }
 
             buf_rt_bboxes = [device newBufferWithBytes:mtl_boxes.data()
@@ -558,7 +337,8 @@ struct MetalSpatialIndex::Impl {
             [enc1 setBuffer:buf_build_boxes offset:0 atIndex:0];
             [enc1 setBuffer:buf_counts offset:0 atIndex:1];
             [enc1 setBuffer:buf_params offset:0 atIndex:2];
-            [enc1 dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            NSUInteger tg_count = std::min((NSUInteger)256, pso_grid_count.maxTotalThreadsPerThreadgroup);
+            [enc1 dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_count, 1, 1)];
             [enc1 endEncoding];
             [cmd1 commit];
             [cmd1 waitUntilCompleted];
@@ -618,7 +398,8 @@ struct MetalSpatialIndex::Impl {
             [enc2 setBuffer:buf_grid_offsets offset:0 atIndex:2];
             [enc2 setBuffer:buf_grid_entries offset:0 atIndex:3];
             [enc2 setBuffer:buf_params offset:0 atIndex:4];
-            [enc2 dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+            NSUInteger tg_pop = std::min((NSUInteger)256, pso_grid_populate.maxTotalThreadsPerThreadgroup);
+            [enc2 dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_pop, 1, 1)];
             [enc2 endEncoding];
             [cmd2 commit];
             [cmd2 waitUntilCompleted];
@@ -787,7 +568,11 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
             return false;
         }
 
-        uint32_t max_results = std::max(count * 8u, 1000000u);
+        uint64_t max_pairs_capacity = impl_->device.maxBufferLength / sizeof(MatchPair);
+        uint64_t initial_max = std::min(max_pairs_capacity, std::max(static_cast<uint64_t>(count) * 8ULL, 1000000ULL));
+        initial_max = std::min(initial_max, static_cast<uint64_t>(UINT32_MAX));
+        uint32_t max_results = static_cast<uint32_t>(initial_max);
+
         id<MTLBuffer> buf_out = [impl_->device newBufferWithLength:sizeof(MatchPair) * max_results
                                                            options:MTLResourceStorageModeShared];
         id<MTLBuffer> buf_count = [impl_->device newBufferWithLength:sizeof(uint32_t)
@@ -831,7 +616,8 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                     [enc setBuffer:buf_num_probes offset:0 atIndex:5];
                     [enc setBuffer:buf_max_results offset:0 atIndex:6];
                     [enc setBuffer:buf_probe_offset offset:0 atIndex:7];
-                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    NSUInteger tg_rt = std::min((NSUInteger)256, impl_->pso_rt_probe.maxTotalThreadsPerThreadgroup);
+                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_rt, 1, 1)];
                     [enc endEncoding];
                     [cmd commit];
                     [cmd waitUntilCompleted];
@@ -872,7 +658,8 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                     [enc setBuffer:buf_out offset:0 atIndex:4];
                     [enc setBuffer:buf_count offset:0 atIndex:5];
                     [enc setBuffer:buf_params offset:0 atIndex:6];
-                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    NSUInteger tg_grid = std::min((NSUInteger)256, impl_->pso_grid_probe.maxTotalThreadsPerThreadgroup);
+                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg_grid, 1, 1)];
                     [enc endEncoding];
                     [cmd commit];
                     [cmd waitUntilCompleted];
@@ -892,6 +679,11 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
 
         uint32_t total_matches = *((uint32_t*)[buf_count contents]);
         if (total_matches > max_results) {
+            uint64_t needed_bytes = static_cast<uint64_t>(total_matches) * sizeof(MatchPair);
+            if (needed_bytes > impl_->device.maxBufferLength || total_matches == UINT32_MAX) {
+                impl_->set_last_error("Match results exceeded maximum Metal buffer capacity");
+                return false;
+            }
             max_results = total_matches;
             buf_out = [impl_->device newBufferWithLength:sizeof(MatchPair) * max_results
                                                  options:MTLResourceStorageModeShared];

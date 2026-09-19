@@ -36,6 +36,16 @@ fn test_lifecycle_and_empty() {
     let (b_res2, p_res2) = index.probe(&dummy_probes).expect("Probe on empty index should succeed");
     assert!(b_res2.is_empty());
     assert!(p_res2.is_empty());
+
+    // Test clear() lifecycle
+    index.push_build(&[[0.0, 0.0, 1.0, 1.0]]).unwrap();
+    index.finish_building().unwrap();
+    let (b_match, _) = index.probe(&[[0.5, 0.5, 0.5, 0.5]]).unwrap();
+    assert_eq!(b_match.len(), 1);
+
+    index.clear().unwrap();
+    let (b_cleared, _) = index.probe(&[[0.5, 0.5, 0.5, 0.5]]).unwrap();
+    assert!(b_cleared.is_empty());
 }
 
 #[test]
