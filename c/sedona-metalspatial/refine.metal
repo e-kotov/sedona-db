@@ -19,7 +19,7 @@
 using namespace metal;
 
 #ifndef BOUND_MODE
-#define BOUND_MODE 0 // 0: certified v2 (default), 1: flawed legacy v1
+#define BOUND_MODE 0 // 0: certified v2 (default), 1: v1 det bound only, 2: band off only, 3: naive delta only
 #endif
 
 #define STATE_OUTSIDE 0
@@ -104,15 +104,14 @@ inline uint32_t evaluate_ring(
         float x2 = v2.x - delta_x;
         float y2 = v2.y - delta_y;
 
-#if BOUND_MODE == 1
-        // Flawed v1: no ray straddle eta-band vertex trap
+#if BOUND_MODE == 2
+        // Mode 2: band off only (no eta-band vertex trap)
 #else
         // Section 2.4 Ray Straddle Vertex Protection:
         // Conservative eta_k-band rule:
-        // Applied to vertices with x >= -eta_k that could graze the positive x ray.
         // If |y1| <= eta_k or |y2| <= eta_k, a vertex lies within the ambiguity band
         // of the ray. Traps potential apex/vertex grazing to avoid false outside results.
-        if ((metal::abs(y1) <= eta_k && x1 >= -eta_k) || (metal::abs(y2) <= eta_k && x2 >= -eta_k)) {
+        if (metal::abs(y1) <= eta_k || metal::abs(y2) <= eta_k) {
             return STATE_UNCERTAIN;
         }
 #endif
@@ -129,7 +128,7 @@ inline uint32_t evaluate_ring(
         float det = x1 * y2 - x2 * y1;
 
 #if BOUND_MODE == 1
-        // Flawed v1 determinant bound:
+        // Mode 1: Flawed v1 determinant bound only:
         float max_coord = metal::max(metal::max(metal::abs(x1), metal::abs(x2)), metal::max(metal::abs(y1), metal::abs(y2)));
         float bound_det = 3.5f * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1)) + u_flt * max_coord;
 #else
@@ -138,8 +137,7 @@ inline uint32_t evaluate_ring(
         float eps_arith = (3.0f + 16.0f * u_flt) * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1));
 
         // Input perturbation: eps_input = eta_k * (|x1| + |x2| + |y1| + |y2|) + 2 * eta_k^2
-        float sum_coords = metal::abs(x1) + metal::abs(x2) + metal::abs(y1) + metal::abs(y2);
-        float eps_input = eta_k * sum_coords + 2.0f * eta_k * eta_k;
+        float eps_input = eta_k * (metal::abs(x1) + metal::abs(x2) + metal::abs(y1) + metal::abs(y2)) + 2.0f * eta_k * eta_k;
 
         // Total forward error bound with safety factor S = 2.0 (Section 2.3 D)
         float bound_det = 2.0f * (eps_arith + eps_input);
@@ -206,7 +204,8 @@ kernel void point_in_polygon_refine(
         return;
     }
 
-#if BOUND_MODE == 1
+#if BOUND_MODE == 3
+    // Mode 3: Naive single-precision subtraction only
     float delta_x = pt.hi_x - poly.origin_hi_x;
     float delta_y = pt.hi_y - poly.origin_hi_y;
 #else
