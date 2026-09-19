@@ -381,10 +381,6 @@ impl DisplayAs for SpatialJoinExec {
 }
 
 impl ExecutionPlan for SpatialJoinExec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "SpatialJoinExec"
     }
