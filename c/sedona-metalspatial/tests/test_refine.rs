@@ -16,9 +16,10 @@
 // under the License.
 
 use arrow_array::{ArrayRef, BinaryArray};
-use byteorder::{LittleEndian, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use robust::Coord;
 use sedona_metalspatial::{ContainerSide, MetalSpatialRefiner};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,75 +29,65 @@ enum OracleResult {
     OnBoundary,
 }
 
+#[derive(Debug, Clone)]
+struct PolyPart {
+    rings: Vec<Vec<(f64, f64)>>, // ring 0 is exterior, rings 1.. are holes
+}
+
+#[derive(Debug, Clone)]
+struct MultiPolyDef {
+    parts: Vec<PolyPart>,
+}
+
 /// Independent Exact PIP Oracle using robust::orient2d over f64 coordinates.
+/// Supports single Polygons and MultiPolygons with holes.
 /// Not a port of the GPU kernel's control flow.
-fn exact_pip_oracle(poly_rings: &[Vec<(f64, f64)>], px: f64, py: f64) -> OracleResult {
-    if poly_rings.is_empty() {
-        return OracleResult::Outside;
-    }
+fn exact_pip_oracle(poly: &MultiPolyDef, px: f64, py: f64) -> OracleResult {
+    // 1. Boundary check across every edge of every ring
+    for part in &poly.parts {
+        for ring in &part.rings {
+            let n = ring.len();
+            for i in 0..n {
+                let (ax, ay) = ring[i];
+                let (bx, by) = ring[(i + 1) % n];
 
-    // 1. Check if point is on the boundary of any ring
-    for ring in poly_rings {
-        let n = ring.len();
-        for i in 0..n {
-            let (ax, ay) = ring[i];
-            let (bx, by) = ring[(i + 1) % n];
+                if ax == bx && ay == by {
+                    continue;
+                }
 
-            if ax == bx && ay == by {
-                continue;
-            }
+                let min_x = ax.min(bx);
+                let max_x = ax.max(bx);
+                let min_y = ay.min(by);
+                let max_y = ay.max(by);
 
-            // Bounding box test of segment
-            let min_x = ax.min(bx);
-            let max_x = ax.max(bx);
-            let min_y = ay.min(by);
-            let max_y = ay.max(by);
-
-            if px >= min_x && px <= max_x && py >= min_y && py <= max_y {
-                let o = robust::orient2d(
-                    Coord { x: ax, y: ay },
-                    Coord { x: bx, y: by },
-                    Coord { x: px, y: py },
-                );
-                if o == 0.0 {
-                    return OracleResult::OnBoundary;
+                if px >= min_x && px <= max_x && py >= min_y && py <= max_y {
+                    let o = robust::orient2d(
+                        Coord { x: ax, y: ay },
+                        Coord { x: bx, y: by },
+                        Coord { x: px, y: py },
+                    );
+                    if o == 0.0 {
+                        return OracleResult::OnBoundary;
+                    }
                 }
             }
         }
     }
 
-    // 2. Evaluate exterior ring (ring 0) using ray-casting with half-open y-interval [min(ay, by), max(ay, by))
-    let ext_ring = &poly_rings[0];
-    let mut crossings = 0;
-    let n = ext_ring.len();
-
-    for i in 0..n {
-        let (ax, ay) = ext_ring[i];
-        let (bx, by) = ext_ring[(i + 1) % n];
-
-        if (ay <= py && py < by) || (by <= py && py < ay) {
-            let o = robust::orient2d(
-                Coord { x: ax, y: ay },
-                Coord { x: bx, y: by },
-                Coord { x: px, y: py },
-            );
-            if (ay < by && o > 0.0) || (by < ay && o < 0.0) {
-                crossings += 1;
-            }
+    // 2. MultiPolygon evaluation: inside if inside at least one part and outside all holes
+    for part in &poly.parts {
+        if part.rings.is_empty() {
+            continue;
         }
-    }
 
-    if (crossings % 2) == 0 {
-        return OracleResult::Outside;
-    }
+        // Check exterior ring (ring 0) using half-open ray casting
+        let ext_ring = &part.rings[0];
+        let mut crossings = 0;
+        let n = ext_ring.len();
 
-    // 3. Evaluate interior rings (holes)
-    for ring in &poly_rings[1..] {
-        let mut hole_crossings = 0;
-        let hn = ring.len();
-        for i in 0..hn {
-            let (ax, ay) = ring[i];
-            let (bx, by) = ring[(i + 1) % hn];
+        for i in 0..n {
+            let (ax, ay) = ext_ring[i];
+            let (bx, by) = ext_ring[(i + 1) % n];
 
             if (ay <= py && py < by) || (by <= py && py < ay) {
                 let o = robust::orient2d(
@@ -105,16 +96,45 @@ fn exact_pip_oracle(poly_rings: &[Vec<(f64, f64)>], px: f64, py: f64) -> OracleR
                     Coord { x: px, y: py },
                 );
                 if (ay < by && o > 0.0) || (by < ay && o < 0.0) {
-                    hole_crossings += 1;
+                    crossings += 1;
                 }
             }
         }
-        if (hole_crossings % 2) != 0 {
-            return OracleResult::Outside; // Inside a hole -> outside polygon
+
+        if (crossings % 2) != 0 {
+            // Check interior holes
+            let mut in_hole = false;
+            for hole in &part.rings[1..] {
+                let mut hole_crossings = 0;
+                let hn = hole.len();
+                for i in 0..hn {
+                    let (ax, ay) = hole[i];
+                    let (bx, by) = hole[(i + 1) % hn];
+
+                    if (ay <= py && py < by) || (by <= py && py < ay) {
+                        let o = robust::orient2d(
+                            Coord { x: ax, y: ay },
+                            Coord { x: bx, y: by },
+                            Coord { x: px, y: py },
+                        );
+                        if (ay < by && o > 0.0) || (by < ay && o < 0.0) {
+                            hole_crossings += 1;
+                        }
+                    }
+                }
+                if (hole_crossings % 2) != 0 {
+                    in_hole = true;
+                    break;
+                }
+            }
+
+            if !in_hole {
+                return OracleResult::Inside;
+            }
         }
     }
 
-    OracleResult::Inside
+    OracleResult::Outside
 }
 
 fn make_point_wkb(x: f64, y: f64) -> Vec<u8> {
@@ -126,325 +146,485 @@ fn make_point_wkb(x: f64, y: f64) -> Vec<u8> {
     buf
 }
 
-fn make_polygon_wkb(rings: &[Vec<(f64, f64)>]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(1); // Little endian
-    buf.write_u32::<LittleEndian>(3).unwrap(); // Polygon
-    buf.write_u32::<LittleEndian>(rings.len() as u32).unwrap();
-    for ring in rings {
-        // Explicitly close if needed
-        let mut closed_ring = ring.clone();
-        if closed_ring.first() != closed_ring.last() {
-            closed_ring.push(closed_ring[0]);
+fn make_multipoly_wkb(poly: &MultiPolyDef) -> Vec<u8> {
+    if poly.parts.len() == 1 {
+        // Single Polygon WKB
+        let part = &poly.parts[0];
+        let mut buf = Vec::new();
+        buf.push(1); // Little endian
+        buf.write_u32::<LittleEndian>(3).unwrap(); // Polygon
+        buf.write_u32::<LittleEndian>(part.rings.len() as u32).unwrap();
+        for ring in &part.rings {
+            let mut closed_ring = ring.clone();
+            if closed_ring.first() != closed_ring.last() {
+                closed_ring.push(closed_ring[0]);
+            }
+            buf.write_u32::<LittleEndian>(closed_ring.len() as u32).unwrap();
+            for (x, y) in closed_ring {
+                buf.write_f64::<LittleEndian>(x).unwrap();
+                buf.write_f64::<LittleEndian>(y).unwrap();
+            }
         }
-        buf.write_u32::<LittleEndian>(closed_ring.len() as u32).unwrap();
-        for (x, y) in closed_ring {
-            buf.write_f64::<LittleEndian>(x).unwrap();
-            buf.write_f64::<LittleEndian>(y).unwrap();
+        buf
+    } else {
+        // MultiPolygon WKB
+        let mut buf = Vec::new();
+        buf.push(1); // Little endian
+        buf.write_u32::<LittleEndian>(6).unwrap(); // MultiPolygon
+        buf.write_u32::<LittleEndian>(poly.parts.len() as u32).unwrap();
+        for part in &poly.parts {
+            buf.push(1); // Little endian
+            buf.write_u32::<LittleEndian>(3).unwrap(); // Polygon
+            buf.write_u32::<LittleEndian>(part.rings.len() as u32).unwrap();
+            for ring in &part.rings {
+                let mut closed_ring = ring.clone();
+                if closed_ring.first() != closed_ring.last() {
+                    closed_ring.push(closed_ring[0]);
+                }
+                buf.write_u32::<LittleEndian>(closed_ring.len() as u32).unwrap();
+                for (x, y) in closed_ring {
+                    buf.write_f64::<LittleEndian>(x).unwrap();
+                    buf.write_f64::<LittleEndian>(y).unwrap();
+                }
+            }
         }
+        buf
     }
-    buf
 }
 
-#[test]
-fn test_gate_1_soundness_against_exact_oracle_10m_pairs() {
-    let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
-    let device_name = refiner.device_name().to_string();
+/// Seeded pseudo-random number generator (LCG)
+struct SeededRng {
+    state: u64,
+}
 
-    // Generate varied geometries: regular box, star shape, concave polygon, polygon with hole
-    let poly_defs: Vec<Vec<Vec<(f64, f64)>>> = vec![
-        // 1. Box
-        vec![vec![
-            (0.0, 0.0),
-            (100.0, 0.0),
-            (100.0, 100.0),
-            (0.0, 100.0),
-        ]],
-        // 2. Concave L-shape
-        vec![vec![
-            (0.0, 0.0),
-            (200.0, 0.0),
-            (200.0, 100.0),
-            (100.0, 100.0),
-            (100.0, 200.0),
-            (0.0, 200.0),
-        ]],
-        // 3. Polygon with hole
-        vec![
-            vec![
-                (0.0, 0.0),
-                (300.0, 0.0),
-                (300.0, 300.0),
-                (0.0, 300.0),
-            ],
-            vec![
-                (100.0, 100.0),
-                (200.0, 100.0),
-                (200.0, 200.0),
-                (100.0, 200.0),
-            ],
-        ],
-        // 4. Star-shaped polygon with sharp spikes
-        vec![vec![
-            (50.0, 0.0),
-            (65.0, 35.0),
-            (100.0, 35.0),
-            (75.0, 60.0),
-            (85.0, 95.0),
-            (50.0, 75.0),
-            (15.0, 95.0),
-            (25.0, 60.0),
-            (0.0, 35.0),
-            (35.0, 35.0),
-        ]],
-    ];
-
-    let poly_wkbs: Vec<Vec<u8>> = poly_defs.iter().map(|p| make_polygon_wkb(p)).collect();
-    let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
-    let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
-
-    refiner.push_build(&poly_array).unwrap();
-    refiner.finish_building().unwrap();
-
-    // Build probe points including adversarial points:
-    // - interior points
-    // - exterior points
-    // - points at +/- 1..4 nextafter steps from edges
-    // - points near spike apexes
-    // - points on horizontal edges
-    let mut probe_coords = Vec::new();
-
-    // 1. Grid of regular test points
-    for ix in 0..100 {
-        for iy in 0..100 {
-            let px = (ix as f64) * 3.5 - 25.0;
-            let py = (iy as f64) * 3.5 - 25.0;
-            probe_coords.push((px, py));
-        }
+impl SeededRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
     }
 
-    // 2. Adversarial nextafter perturbation points near boundary segments
-    let nextafter_steps: [i32; 8] = [-4, -3, -2, -1, 1, 2, 3, 4];
-    for p_def in &poly_defs {
-        for ring in p_def {
-            for &(vx, vy) in ring {
-                for &step in &nextafter_steps {
-                    let mut pxx = vx;
-                    for _ in 0..step.abs() {
-                        pxx = if step > 0 { pxx.next_up() } else { pxx.next_down() };
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        let v = (self.next_u64() >> 11) as f64;
+        v / 9007199254740992.0 // in [0, 1)
+    }
+}
+
+/// Generates the adversarial polygon and probe suite matching T1/T2 requirements.
+/// Only unique pairs are generated.
+fn generate_adversarial_suite(
+    cx: f64,
+    cy: f64,
+    r_poly: f64,
+    seed: u64,
+) -> (Vec<MultiPolyDef>, Vec<(f64, f64)>, Vec<(u32, u32)>) {
+    let mut rng = SeededRng::new(seed);
+    let mut polys = Vec::new();
+
+    // 1. Star-shaped polygon with sharp spikes around (cx, cy)
+    let num_star_verts = 16;
+    let mut star_ring = Vec::with_capacity(num_star_verts);
+    for i in 0..num_star_verts {
+        let angle = (i as f64) * std::f64::consts::TAU / (num_star_verts as f64);
+        let rad_factor = if i % 4 == 0 {
+            1.5 // spike apex!
+        } else if i % 2 == 1 {
+            0.4
+        } else {
+            0.8 + 0.3 * rng.next_f64()
+        };
+        let r = r_poly * rad_factor;
+        star_ring.push((cx + r * angle.cos(), cy + r * angle.sin()));
+    }
+    polys.push(MultiPolyDef {
+        parts: vec![PolyPart { rings: vec![star_ring] }],
+    });
+
+    // 2. Polygon with an interior hole
+    let ext_box = vec![
+        (cx - r_poly, cy - r_poly),
+        (cx + r_poly, cy - r_poly),
+        (cx + r_poly, cy + r_poly),
+        (cx - r_poly, cy + r_poly),
+    ];
+    let hole_box = vec![
+        (cx - r_poly * 0.3, cy - r_poly * 0.3),
+        (cx + r_poly * 0.3, cy - r_poly * 0.3),
+        (cx + r_poly * 0.3, cy + r_poly * 0.3),
+        (cx - r_poly * 0.3, cy + r_poly * 0.3),
+    ];
+    polys.push(MultiPolyDef {
+        parts: vec![PolyPart { rings: vec![ext_box, hole_box] }],
+    });
+
+    // 3. MultiPolygon with 2 disjoint parts
+    let part1 = PolyPart {
+        rings: vec![vec![
+            (cx - r_poly * 1.5, cy),
+            (cx - r_poly * 0.5, cy),
+            (cx - r_poly * 0.5, cy + r_poly),
+            (cx - r_poly * 1.5, cy + r_poly),
+        ]],
+    };
+    let part2 = PolyPart {
+        rings: vec![vec![
+            (cx + r_poly * 0.5, cy),
+            (cx + r_poly * 1.5, cy),
+            (cx + r_poly * 1.5, cy + r_poly),
+            (cx + r_poly * 0.5, cy + r_poly),
+        ]],
+    };
+    polys.push(MultiPolyDef {
+        parts: vec![part1, part2],
+    });
+
+    // 4. Polygon with ring variants: axis-aligned edges, 45° edges, collinear triples, duplicate vertices
+    let variant_ring = vec![
+        (cx - r_poly * 0.5, cy - r_poly * 0.5),
+        (cx + r_poly * 0.5, cy - r_poly * 0.5), // horizontal edge
+        (cx + r_poly * 0.5, cy - r_poly * 0.5), // duplicate consecutive vertex
+        (cx + r_poly, cy),                     // 45° edge
+        (cx + r_poly * 0.5, cy + r_poly * 0.5), // 45° edge
+        (cx, cy + r_poly * 0.5),                // collinear triple part 1
+        (cx - r_poly * 0.5, cy + r_poly * 0.5), // collinear triple part 2
+        (cx - r_poly * 0.5, cy),                // vertical edge
+    ];
+    polys.push(MultiPolyDef {
+        parts: vec![PolyPart { rings: vec![variant_ring] }],
+    });
+
+    // Collect all probe points across adversarial perturbation scales
+    let mut probe_points = Vec::new();
+
+    // (a) Interior center points
+    probe_points.push((cx, cy));
+    probe_points.push((cx + r_poly * 0.01, cy + r_poly * 0.01));
+
+    // (b) Exterior points
+    probe_points.push((cx + r_poly * 3.0, cy + r_poly * 3.0));
+    probe_points.push((cx - r_poly * 3.0, cy - r_poly * 3.0));
+
+    // Perturbation scale factors required by T1:
+    let k_values: [f64; 11] = [0.0, -1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -16.0, 16.0, -256.0, 256.0];
+
+    let eta_k = 4.0 * 5.9604645e-8 * r_poly;
+
+    for poly in &polys {
+        for part in &poly.parts {
+            for ring in &part.rings {
+                let n = ring.len();
+                for i in 0..n {
+                    let (ax, ay) = ring[i];
+                    let (bx, by) = ring[(i + 1) % n];
+
+                    let dx = bx - ax;
+                    let dy = by - ay;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len == 0.0 {
+                        continue;
                     }
-                    probe_coords.push((pxx, vy));
-                    probe_coords.push((vx, pxx));
+                    let nx = -dy / len;
+                    let ny = dx / len;
+
+                    // Edge interior points at t in {0.25, 0.5, 0.75}
+                    for &t in &[0.25, 0.5, 0.75] {
+                        let mx = ax + t * dx;
+                        let my = ay + t * dy;
+                        let m_coord = mx.abs().max(my.abs()).max(1.0);
+
+                        let s_values = [
+                            2.22e-16 * m_coord,   // f64 ulp of coordinate
+                            1.19e-7 * m_coord,    // f32 ulp of coordinate
+                            1.19e-7 * r_poly,     // f32 ulp of R_poly
+                            eta_k * 0.25,         // eta_k / 4
+                            eta_k,                // eta_k
+                            4.0 * eta_k,          // 4 * eta_k
+                        ];
+
+                        for &s in &s_values {
+                            for &k in &k_values {
+                                probe_points.push((mx + k * s * nx, my + k * s * ny));
+                            }
+                        }
+                    }
+
+                    // Vertex offsets around (ax, ay), including apexes (above and below)
+                    let v_coord = ax.abs().max(ay.abs()).max(1.0);
+                    let s_values_v = [
+                        2.22e-16 * v_coord,
+                        1.19e-7 * v_coord,
+                        1.19e-7 * r_poly,
+                        eta_k * 0.25,
+                        eta_k,
+                        4.0 * eta_k,
+                    ];
+
+                    for &s in &s_values_v {
+                        for &k in &k_values {
+                            probe_points.push((ax, ay + k * s)); // vertical perturbation (straddle apex check)
+                            probe_points.push((ax + k * s, ay)); // horizontal perturbation
+                        }
+                    }
                 }
             }
         }
     }
 
-    let num_probes = probe_coords.len();
-    let probe_wkbs: Vec<Vec<u8>> = probe_coords.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
-    let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
-    let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+    // Deduplicate probe points to ensure all points are unique
+    let mut unique_probes = Vec::with_capacity(probe_points.len());
+    let mut seen_probes = HashSet::new();
+    for (px, py) in probe_points {
+        let key = (px.to_bits(), py.to_bits());
+        if seen_probes.insert(key) {
+            unique_probes.push((px, py));
+        }
+    }
 
-    // Form >= 10,000,000 candidate pairs
-    let num_polys = poly_defs.len();
-    let pairs_per_cycle = num_polys * num_probes;
-    let target_pairs: usize = 10_000_000;
-    let repeat_cycles = (target_pairs + pairs_per_cycle - 1) / pairs_per_cycle;
+    // Build unique candidate pairs
+    let num_polys = polys.len();
+    let num_probes = unique_probes.len();
+    let mut candidate_pairs = Vec::with_capacity(num_polys * num_probes);
+    for b in 0..num_polys {
+        for p in 0..num_probes {
+            candidate_pairs.push((b as u32, p as u32));
+        }
+    }
 
-    let mut candidate_build = Vec::with_capacity(repeat_cycles * pairs_per_cycle);
-    let mut candidate_probe = Vec::with_capacity(repeat_cycles * pairs_per_cycle);
+    (polys, unique_probes, candidate_pairs)
+}
 
-    for _ in 0..repeat_cycles {
-        for b in 0..num_polys {
-            for p in 0..num_probes {
-                candidate_build.push(b as u32);
-                candidate_probe.push(p as u32);
+/// Executes full two-sided verification against exact f64 oracle.
+/// Asserts:
+///   GPU Inside  => oracle Inside  (0 false positives)
+///   GPU Outside => oracle Outside (0 false negatives; oracle OnBoundary must never be GPU-definite)
+fn verify_two_sided(
+    verified: &[(u32, u32)],
+    uncertain: &[(u32, u32)],
+    all_pairs: &[(u32, u32)],
+    polys: &[MultiPolyDef],
+    probes: &[(f64, f64)],
+) -> (usize, usize, usize, usize) {
+    let verified_set: HashSet<(u32, u32)> = verified.iter().copied().collect();
+    let uncertain_set: HashSet<(u32, u32)> = uncertain.iter().copied().collect();
+
+    let mut inside_count = 0;
+    let mut uncertain_count = 0;
+    let mut outside_count = 0;
+    let mut mismatches = 0;
+
+    for &(b, p) in all_pairs {
+        let (px, py) = probes[p as usize];
+        let oracle = exact_pip_oracle(&polys[b as usize], px, py);
+
+        if verified_set.contains(&(b, p)) {
+            inside_count += 1;
+            // GPU says Inside => oracle MUST be Inside
+            if oracle != OracleResult::Inside {
+                mismatches += 1;
+            }
+        } else if uncertain_set.contains(&(b, p)) {
+            uncertain_count += 1;
+            // Safely routed to CPU uncertain list
+        } else {
+            outside_count += 1;
+            // GPU says Outside => oracle MUST be Outside
+            if oracle != OracleResult::Outside {
+                mismatches += 1;
             }
         }
     }
 
-    let total_candidates = candidate_build.len();
-    assert!(total_candidates >= 10_000_000, "Candidate count must be >= 10M");
+    (inside_count, uncertain_count, outside_count, mismatches)
+}
+
+#[test]
+fn test_gate_1_full_two_sided_soundness() {
+    let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
+    let device_name = refiner.device_name().to_string();
+
+    let (polys, probes, candidate_pairs) =
+        generate_adversarial_suite(500_000.0, 500_000.0, 10_000.0, 42);
+
+    let poly_wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
+    let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
+
+    let probe_wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+    let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+
+    let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = candidate_pairs.iter().copied().unzip();
 
     let mut verified_build = Vec::new();
     let mut verified_probe = Vec::new();
     let mut uncertain_build = Vec::new();
     let mut uncertain_probe = Vec::new();
 
-    let start_time = std::time::Instant::now();
     refiner
         .refine(
             &probe_array,
             ContainerSide::Build,
-            &candidate_build,
-            &candidate_probe,
+            &cand_b,
+            &cand_p,
             &mut verified_build,
             &mut verified_probe,
             &mut uncertain_build,
             &mut uncertain_probe,
         )
         .expect("Refine failed");
-    let elapsed = start_time.elapsed();
 
-    // Verify soundness against exact f64 oracle for each unique candidate pair
-    let mut mismatches = 0;
-    let mut oracle_cache = Vec::new();
-    for b in 0..num_polys {
-        let mut row = Vec::with_capacity(num_probes);
-        for p in 0..num_probes {
-            let (px, py) = probe_coords[p];
-            row.push(exact_pip_oracle(&poly_defs[b], px, py));
-        }
-        oracle_cache.push(row);
-    }
+    let verified_pairs: Vec<(u32, u32)> = verified_build.into_iter().zip(verified_probe).collect();
+    let uncertain_pairs: Vec<(u32, u32)> = uncertain_build.into_iter().zip(uncertain_probe).collect();
 
-    // Verify that every pair in verified is strictly OracleResult::Inside
-    for i in 0..verified_build.len() {
-        let b = verified_build[i] as usize;
-        let p = verified_probe[i] as usize;
-        let oracle = oracle_cache[b][p];
-        if oracle != OracleResult::Inside {
-            mismatches += 1;
-        }
-    }
-
-    let uncertain_rate = (uncertain_build.len() as f64) / (total_candidates as f64);
-
-    println!(
-        "[GATE 1 REPORT] Command: cargo test test_gate_1 | Device: {} | Pairs: {} | Mismatches: {} | Uncertain Rate: {:.4}% | Time: {:?}",
-        device_name,
-        total_candidates,
-        mismatches,
-        uncertain_rate * 100.0,
-        elapsed
+    let (inside, uncertain, outside, mismatches) = verify_two_sided(
+        &verified_pairs,
+        &uncertain_pairs,
+        &candidate_pairs,
+        &polys,
+        &probes,
     );
 
-    assert_eq!(mismatches, 0, "Gate 1 failed: found {} mismatches against exact oracle", mismatches);
-    assert!(verified_build.len() > 0, "Gate 1 must find interior matches");
+    let uncertain_rate = (uncertain as f64) / (candidate_pairs.len() as f64);
+
+    println!(
+        "[GATE 1 REPORT] Device: {} | Unique Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Uncertain Rate: {:.2}% | Mismatches: {}",
+        device_name,
+        candidate_pairs.len(),
+        inside,
+        outside,
+        uncertain,
+        uncertain_rate * 100.0,
+        mismatches
+    );
+
+    // Assertion: GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside over all unique pairs
+    assert_eq!(mismatches, 0, "Gate 1 full two-sided check failed: found {} mismatches", mismatches);
+    assert!(inside > 0, "Gate 1 must find verified inside pairs");
+    assert!(outside > 0, "Gate 1 must find verified outside pairs");
 }
 
 #[test]
-fn test_gate_2_multi_scale_invariance() {
+fn test_gate_2_full_scale_matrix() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
     let device_name = refiner.device_name().to_string();
 
-    let scales = [
-        ("lon_lat_1e2", 100.0f64, 1.0f64),
-        ("projected_meters_1e5", 500_000.0f64, 1_000.0f64),
-        ("continental_1e7", 10_000_000.0f64, 50_000.0f64),
-        ("micro_radius_1e_minus_3", 10.0f64, 0.001f64),
-    ];
+    let centers = [1e2, 5e5, 1e7, -1e7];
+    let radii = [1e-3, 1.0, 1e3, 1e5, 1e6];
 
-    for &(scale_name, center, radius) in &scales {
-        refiner.clear().unwrap();
+    println!("------------------------------------------------------------------------------------------------------");
+    println!("GATE 2 MATRIX: (center, R) in {{1e2, 5e5, 1e7, -1e7}} x {{1e-3, 1, 1e3, 1e5, 1e6}} (Two-Sided Check)");
+    println!("------------------------------------------------------------------------------------------------------");
 
-        let poly_ring = vec![
-            (center - radius, center - radius),
-            (center + radius, center - radius),
-            (center + radius, center + radius),
-            (center - radius, center + radius),
-        ];
-        let poly_defs = vec![poly_ring];
-        let poly_wkb = make_polygon_wkb(&poly_defs);
-        let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+    for &cx in &centers {
+        for &r in &radii {
+            refiner.clear().unwrap();
 
-        refiner.push_build(&poly_array).unwrap();
-        refiner.finish_building().unwrap();
+            let (polys, probes, candidate_pairs) =
+                generate_adversarial_suite(cx, cx, r, 12345);
 
-        // Probes: interior, exterior, near edge
-        let probes = vec![
-            (center, center),                                 // strictly inside
-            (center + radius * 2.0, center),                  // strictly outside
-            (center + radius + 1e-6, center),                 // slightly outside
-            (center + radius - 1e-6, center),                 // slightly inside
-        ];
+            let poly_wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
+            let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
 
-        let probe_wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
-        let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
-        let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+            let probe_wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+            let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
 
-        let build_indices = vec![0, 0, 0, 0];
-        let probe_indices = vec![0, 1, 2, 3];
+            refiner.push_build(&poly_array).unwrap();
+            refiner.finish_building().unwrap();
 
-        let mut verified_build = Vec::new();
-        let mut verified_probe = Vec::new();
-        let mut uncertain_build = Vec::new();
-        let mut uncertain_probe = Vec::new();
+            let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = candidate_pairs.iter().copied().unzip();
 
-        refiner
-            .refine(
-                &probe_array,
-                ContainerSide::Build,
-                &build_indices,
-                &probe_indices,
-                &mut verified_build,
-                &mut verified_probe,
-                &mut uncertain_build,
-                &mut uncertain_probe,
-            )
-            .unwrap();
+            let mut verified_build = Vec::new();
+            let mut verified_probe = Vec::new();
+            let mut uncertain_build = Vec::new();
+            let mut uncertain_probe = Vec::new();
 
-        // Verify matches against exact oracle
-        let mut mismatches = 0;
-        for i in 0..verified_build.len() {
-            let p = verified_probe[i] as usize;
-            let (px, py) = probes[p];
-            let oracle = exact_pip_oracle(&poly_defs, px, py);
-            if oracle != OracleResult::Inside {
-                mismatches += 1;
-            }
+            refiner
+                .refine(
+                    &probe_array,
+                    ContainerSide::Build,
+                    &cand_b,
+                    &cand_p,
+                    &mut verified_build,
+                    &mut verified_probe,
+                    &mut uncertain_build,
+                    &mut uncertain_probe,
+                )
+                .unwrap();
+
+            let verified_pairs: Vec<(u32, u32)> = verified_build.into_iter().zip(verified_probe).collect();
+            let uncertain_pairs: Vec<(u32, u32)> = uncertain_build.into_iter().zip(uncertain_probe).collect();
+
+            let (_inside, uncertain, _outside, mismatches) = verify_two_sided(
+                &verified_pairs,
+                &uncertain_pairs,
+                &candidate_pairs,
+                &polys,
+                &probes,
+            );
+
+            let uncertain_rate = (uncertain as f64) / (candidate_pairs.len() as f64);
+
+            println!(
+                "[GATE 2 CELL] Center: {:+1.0e} | R: {:1.0e} | Pairs: {:5} | Mismatches: {} | Uncertain: {:.2}% | asserts GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside",
+                cx, r, candidate_pairs.len(), mismatches, uncertain_rate * 100.0
+            );
+
+            assert_eq!(mismatches, 0, "Cell center: {}, R: {} failed with {} mismatches", cx, r, mismatches);
         }
-
-        let uncertain_rate = (uncertain_build.len() as f64) / (build_indices.len() as f64);
-        println!(
-            "[GATE 2 REPORT - {}] Device: {} | Pairs: {} | Mismatches: {} | Uncertain Rate: {:.2}%",
-            scale_name,
-            device_name,
-            build_indices.len(),
-            mismatches,
-            uncertain_rate * 100.0
-        );
-
-        assert_eq!(mismatches, 0);
-        // Interior point (probe 0) must be verified
-        assert!(verified_probe.contains(&0));
     }
+    println!("------------------------------------------------------------------------------------------------------");
+    println!("Gate 2: All 20 cells in scale matrix passed with 0 mismatches on {}", device_name);
 }
 
 #[test]
-fn test_gate_3_empirical_uncertainty_rates() {
+fn test_gate_3_deterministic_uniform_lattice() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
     let device_name = refiner.device_name().to_string();
 
-    // Box with uniform random distributed points across bounding box and border
-    let poly_ring = vec![
-        (100.0, 100.0),
-        (200.0, 100.0),
-        (200.0, 200.0),
-        (100.0, 200.0),
-    ];
-    let poly_defs = vec![poly_ring];
-    let poly_wkb = make_polygon_wkb(&poly_defs);
+    let poly = MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![
+                (100.0, 100.0),
+                (200.0, 100.0),
+                (200.0, 200.0),
+                (100.0, 200.0),
+            ]],
+        }],
+    };
+    let poly_wkb = make_multipoly_wkb(&poly);
     let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
 
     refiner.push_build(&poly_array).unwrap();
     refiner.finish_building().unwrap();
 
-    let mut points = Vec::new();
-    let count = 50_000;
-    for i in 0..count {
-        let frac = (i as f64) / (count as f64);
-        let px = 80.0 + frac * 140.0;
-        let py = 80.0 + ((i * 37) % count) as f64 / (count as f64) * 140.0;
-        points.push((px, py));
+    // Deterministic 200x250 uniform lattice over [80, 220] x [80, 220]
+    let count_x = 200;
+    let count_y = 250;
+    let total_points = count_x * count_y;
+    let mut points = Vec::with_capacity(total_points);
+
+    for ix in 0..count_x {
+        for iy in 0..count_y {
+            let px = 80.0 + (ix as f64) * (140.0 / count_x as f64);
+            let py = 80.0 + (iy as f64) * (140.0 / count_y as f64);
+            points.push((px, py));
+        }
     }
 
     let probe_wkbs: Vec<Vec<u8>> = points.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
     let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
     let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
 
-    let build_indices: Vec<u32> = vec![0; count];
-    let probe_indices: Vec<u32> = (0..count as u32).collect();
+    let build_indices: Vec<u32> = vec![0; total_points];
+    let probe_indices: Vec<u32> = (0..total_points as u32).collect();
 
     let mut verified_build = Vec::new();
     let mut verified_probe = Vec::new();
@@ -464,48 +644,68 @@ fn test_gate_3_empirical_uncertainty_rates() {
         )
         .unwrap();
 
-    let uncertain_rate = (uncertain_build.len() as f64) / (count as f64);
+    let uncertain_rate = (uncertain_build.len() as f64) / (total_points as f64);
     println!(
-        "[GATE 3 REPORT] Device: {} | Dataset: Synthetic Uniform 50K | Verified: {} | Uncertain: {} | Rate: {:.4}%",
+        "[GATE 3 REPORT] Device: {} | Dataset: Deterministic Uniform Lattice 50K | Verified: {} | Uncertain: {} | Rate: {:.4}% | asserts uncertain rate < 5%",
         device_name,
         verified_build.len(),
         uncertain_build.len(),
         uncertain_rate * 100.0
     );
 
-    assert!(uncertain_rate < 0.05, "Uncertainty rate for uniform points should be < 5%");
+    assert!(uncertain_rate < 0.05, "Uncertainty rate for deterministic lattice points must be < 5%");
 }
 
 #[test]
-fn test_gate_4_mixed_types_and_degeneracies() {
+fn test_gate_4_mixed_types_and_degeneracies_both_sides() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
 
-    let valid_poly = make_polygon_wkb(&[vec![
-        (0.0, 0.0),
-        (10.0, 0.0),
-        (10.0, 10.0),
-        (0.0, 10.0),
-    ]]);
-    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(valid_poly.as_slice())]));
+    // Build side with:
+    // 0: Valid polygon
+    // 1: Null row
+    // 2: NaN polygon coordinates
+    // 3: Empty WKB
+    // 4: Corrupt bytes
+    let valid_poly = make_multipoly_wkb(&MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![
+                (0.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 10.0),
+                (0.0, 10.0),
+            ]],
+        }],
+    });
+    let nan_poly = make_point_wkb(f64::NAN, 1.0); // wrong type and nan
+    let empty_wkb = vec![1u8, 3, 0, 0, 0, 0, 0, 0, 0];
+    let corrupt_wkb = vec![1u8, 3, 0];
+
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![
+        Some(valid_poly.as_slice()),
+        None,
+        Some(nan_poly.as_slice()),
+        Some(empty_wkb.as_slice()),
+        Some(corrupt_wkb.as_slice()),
+    ]));
     refiner.push_build(&poly_array).unwrap();
     refiner.finish_building().unwrap();
 
-    // Mixed probe types:
-    // 0: Valid point interior
-    let p_valid = make_point_wkb(5.0, 5.0);
+    // Probe side with:
+    // 0: Valid point interior (5, 5)
     // 1: Empty WKB
+    // 2: NaN point coordinates
+    // 3: LineString
+    // 4: MultiPoint
+    let p_valid = make_point_wkb(5.0, 5.0);
     let p_empty = vec![1u8, 1, 0, 0, 0];
-    // 2: NaN coordinates
     let p_nan = make_point_wkb(f64::NAN, 5.0);
-    // 3: LineString (Type 2)
     let mut p_line = vec![1u8];
-    p_line.write_u32::<LittleEndian>(2).unwrap(); // LineString
-    p_line.write_u32::<LittleEndian>(2).unwrap(); // 2 points
+    p_line.write_u32::<LittleEndian>(2).unwrap();
+    p_line.write_u32::<LittleEndian>(2).unwrap();
     p_line.extend_from_slice(&[0u8; 32]);
-    // 4: MultiPoint (Type 4)
     let mut p_mp = vec![1u8];
-    p_mp.write_u32::<LittleEndian>(4).unwrap(); // MultiPoint
-    p_mp.write_u32::<LittleEndian>(0).unwrap(); // 0 points
+    p_mp.write_u32::<LittleEndian>(4).unwrap();
+    p_mp.write_u32::<LittleEndian>(0).unwrap();
 
     let probe_array: ArrayRef = Arc::new(BinaryArray::from(vec![
         Some(p_valid.as_slice()),
@@ -515,8 +715,19 @@ fn test_gate_4_mixed_types_and_degeneracies() {
         Some(p_mp.as_slice()),
     ]));
 
-    let build_indices = vec![0, 0, 0, 0, 0];
-    let probe_indices = vec![0, 1, 2, 3, 4];
+    // Pairs testing both sides:
+    // (0, 0): valid build, valid probe -> verified
+    // (1, 0): null build, valid probe -> uncertain
+    // (2, 0): nan build, valid probe -> uncertain
+    // (3, 0): empty build, valid probe -> uncertain
+    // (0, 1): valid build, empty probe -> uncertain
+    // (0, 2): valid build, nan probe -> uncertain
+    // (0, 3): valid build, line probe -> uncertain
+    // (0, 4): valid build, multipoint probe -> uncertain
+    // (99, 0): out-of-range build index -> uncertain (no GPU OOB)
+    // (0, 99): out-of-range probe index -> uncertain (no GPU OOB)
+    let build_indices = vec![0, 1, 2, 3, 0, 0, 0, 0, 99, 0];
+    let probe_indices = vec![0, 0, 0, 0, 1, 2, 3, 4, 0, 99];
 
     let mut verified_build = Vec::new();
     let mut verified_probe = Vec::new();
@@ -536,191 +747,400 @@ fn test_gate_4_mixed_types_and_degeneracies() {
         )
         .unwrap();
 
-    // Row 0 should be verified
+    println!(
+        "[GATE 4 REPORT] Verified: {:?} | Uncertain count: {} | asserts mixed/nan/out-of-range rows route to uncertain with indices intact",
+        verified_probe, uncertain_probe.len()
+    );
+
+    // Only pair (0, 0) is valid and inside
+    assert_eq!(verified_build, vec![0]);
     assert_eq!(verified_probe, vec![0]);
-    // Rows 1, 2, 3, 4 must all be routed to uncertain with indices intact
-    assert_eq!(uncertain_probe, vec![1, 2, 3, 4]);
-    assert_eq!(uncertain_build, vec![0, 0, 0, 0]);
+
+    // All other 9 pairs must route to uncertain
+    assert_eq!(uncertain_build.len(), 9);
+    assert_eq!(uncertain_probe.len(), 9);
+    assert_eq!(uncertain_build, vec![1, 2, 3, 0, 0, 0, 0, 99, 0]);
+    assert_eq!(uncertain_probe, vec![0, 0, 0, 1, 2, 3, 4, 0, 99]);
 }
 
 #[test]
-fn test_gate_5_swapped_orientation() {
+fn test_gate_5_and_6_swapped_and_container_inversion() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
 
-    let poly = make_polygon_wkb(&[vec![
-        (0.0, 0.0),
-        (10.0, 0.0),
-        (10.0, 10.0),
-        (0.0, 10.0),
-    ]]);
-    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly.as_slice())]));
-    refiner.push_build(&poly_array).unwrap();
+    // Case (a): Real swapped case: Points pushed as build array and Polygons as probe array
+    let pt = make_point_wkb(5.0, 5.0);
+    let pt_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(pt.as_slice())]));
+    refiner.push_build(&pt_array).unwrap();
     refiner.finish_building().unwrap();
 
-    let pt = make_point_wkb(5.0, 5.0);
-    let probe_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(pt.as_slice())]));
+    let poly = make_multipoly_wkb(&MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![
+                (0.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 10.0),
+                (0.0, 10.0),
+            ]],
+        }],
+    });
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly.as_slice())]));
 
     let build_indices = vec![0];
     let probe_indices = vec![0];
 
-    let mut verified_build = Vec::new();
-    let mut verified_probe = Vec::new();
-    let mut uncertain_build = Vec::new();
-    let mut uncertain_probe = Vec::new();
+    let mut v_b = Vec::new();
+    let mut v_p = Vec::new();
+    let mut u_b = Vec::new();
+    let mut u_p = Vec::new();
 
-    // With ContainerSide::Probe (swapped orientation where probe must contain build),
-    // probe point cannot contain a polygon -> must route to uncertain
     refiner
         .refine(
-            &probe_array,
-            ContainerSide::Probe,
+            &poly_array,
+            ContainerSide::Build,
             &build_indices,
             &probe_indices,
-            &mut verified_build,
-            &mut verified_probe,
-            &mut uncertain_build,
-            &mut uncertain_probe,
+            &mut v_b,
+            &mut v_p,
+            &mut u_b,
+            &mut u_p,
         )
         .unwrap();
 
-    assert!(verified_build.is_empty());
-    assert_eq!(uncertain_build, vec![0]);
-    assert_eq!(uncertain_probe, vec![0]);
+    // Must route to uncertain with intact indices and zero panics
+    assert!(v_b.is_empty(), "Point on build side cannot produce verified matches");
+    assert_eq!(u_b, vec![0]);
+    assert_eq!(u_p, vec![0]);
+
+    // Case (b): ContainerSide::Either with interior, exterior and boundary points
+    refiner.clear().unwrap();
+    refiner.push_build(&poly_array).unwrap(); // polygon on build side
+    refiner.finish_building().unwrap();
+
+    let probes = vec![
+        make_point_wkb(5.0, 5.0),   // interior
+        make_point_wkb(15.0, 5.0),  // exterior
+        make_point_wkb(10.0, 5.0),  // boundary
+    ];
+    let probe_slices: Vec<Option<&[u8]>> = probes.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_arr: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+    let b_idx = vec![0, 0, 0];
+    let p_idx = vec![0, 1, 2];
+    let mut vb2 = Vec::new();
+    let mut vp2 = Vec::new();
+    let mut ub2 = Vec::new();
+    let mut up2 = Vec::new();
+
+    refiner
+        .refine(
+            &probe_arr,
+            ContainerSide::Either,
+            &b_idx,
+            &p_idx,
+            &mut vb2,
+            &mut vp2,
+            &mut ub2,
+            &mut up2,
+        )
+        .unwrap();
+
+    println!(
+        "[GATE 5/6 REPORT] Either verified: {:?} | Either uncertain: {:?} | asserts ContainerSide::Either verifies interior and routes boundary to uncertain",
+        vp2, up2
+    );
+    assert_eq!(vp2, vec![0], "Interior point 0 must be verified");
+    assert!(up2.contains(&2), "Boundary point 2 must be routed to uncertain");
+
+    // Case (c): ContainerSide::Probe with strictly interior points (Gate 6 Inversion Gate)
+    let mut vb3 = Vec::new();
+    let mut vp3 = Vec::new();
+    let mut ub3 = Vec::new();
+    let mut up3 = Vec::new();
+
+    refiner
+        .refine(
+            &probe_arr,
+            ContainerSide::Probe,
+            &b_idx,
+            &p_idx,
+            &mut vb3,
+            &mut vp3,
+            &mut ub3,
+            &mut up3,
+        )
+        .unwrap();
+
+    assert!(vb3.is_empty(), "ContainerSide::Probe must produce exactly zero verified pairs from GPU");
+    assert_eq!(ub3.len(), 3);
 }
 
 #[test]
-fn test_gate_6_container_direction_inversion_gate() {
-    let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
-    let device_name = refiner.device_name().to_string();
+fn test_gate_7_teeth_test_adversarial_v1_vs_v2_bound() {
+    // T3: Run the adversarial suite under both BOUND_MODE = 1 (v1 legacy) and BOUND_MODE = 0 (v2 approved).
+    // Assert:
+    //   Under v1: at least one definite misclassification (mismatches > 0).
+    //   Under v2: exactly zero mismatches (mismatches == 0).
+    let cx = 10_000_000.0f64;
+    let cy = 10_000_000.0f64;
+    let r = 100_000.0f64;
 
-    // Polygons on build side, points on probe side
-    let poly = make_polygon_wkb(&[vec![
+    let (polys, probes, candidate_pairs) = generate_adversarial_suite(cx, cy, r, 9999);
+
+    let poly_wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
+    let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
+
+    let probe_wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+    let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+    let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = candidate_pairs.iter().copied().unzip();
+
+    // 1. Run under BOUND_MODE = 1 (v1 flawed bound)
+    let mut refiner_v1 = MetalSpatialRefiner::try_new_with_mode(1).expect("Failed to create v1 refiner");
+    refiner_v1.push_build(&poly_array).unwrap();
+    refiner_v1.finish_building().unwrap();
+
+    let mut v1_vb = Vec::new();
+    let mut v1_vp = Vec::new();
+    let mut v1_ub = Vec::new();
+    let mut v1_up = Vec::new();
+
+    refiner_v1
+        .refine(
+            &probe_array,
+            ContainerSide::Build,
+            &cand_b,
+            &cand_p,
+            &mut v1_vb,
+            &mut v1_vp,
+            &mut v1_ub,
+            &mut v1_up,
+        )
+        .unwrap();
+
+    let v1_verified: Vec<(u32, u32)> = v1_vb.into_iter().zip(v1_vp).collect();
+    let v1_uncertain: Vec<(u32, u32)> = v1_ub.into_iter().zip(v1_up).collect();
+
+    let (v1_in, v1_unc, v1_out, v1_mismatches) = verify_two_sided(
+        &v1_verified,
+        &v1_uncertain,
+        &candidate_pairs,
+        &polys,
+        &probes,
+    );
+
+    println!(
+        "[GATE 7 TEETH TEST - V1 MODE] Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
+        candidate_pairs.len(), v1_in, v1_out, v1_unc, v1_mismatches
+    );
+
+    // 2. Run under BOUND_MODE = 0 (v2 approved bound)
+    let mut refiner_v2 = MetalSpatialRefiner::try_new_with_mode(0).expect("Failed to create v2 refiner");
+    refiner_v2.push_build(&poly_array).unwrap();
+    refiner_v2.finish_building().unwrap();
+
+    let mut v2_vb = Vec::new();
+    let mut v2_vp = Vec::new();
+    let mut v2_ub = Vec::new();
+    let mut v2_up = Vec::new();
+
+    refiner_v2
+        .refine(
+            &probe_array,
+            ContainerSide::Build,
+            &cand_b,
+            &cand_p,
+            &mut v2_vb,
+            &mut v2_vp,
+            &mut v2_ub,
+            &mut v2_up,
+        )
+        .unwrap();
+
+    let v2_verified: Vec<(u32, u32)> = v2_vb.into_iter().zip(v2_vp).collect();
+    let v2_uncertain: Vec<(u32, u32)> = v2_ub.into_iter().zip(v2_up).collect();
+
+    let (v2_in, v2_unc, v2_out, v2_mismatches) = verify_two_sided(
+        &v2_verified,
+        &v2_uncertain,
+        &candidate_pairs,
+        &polys,
+        &probes,
+    );
+
+    println!(
+        "[GATE 7 TEETH TEST - V2 MODE] Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
+        candidate_pairs.len(), v2_in, v2_out, v2_unc, v2_mismatches
+    );
+
+    // T3 Invariants:
+    // Flawed v1 bound MUST produce at least one definite misclassification (mismatches > 0).
+    assert!(
+        v1_mismatches > 0,
+        "Teeth test failed: v1 flawed bound produced 0 mismatches! Test suite is inadequate."
+    );
+    // Approved v2 bound MUST produce zero mismatches.
+    assert_eq!(
+        v2_mismatches, 0,
+        "Teeth test failed: v2 approved bound produced {} mismatches!",
+        v2_mismatches
+    );
+}
+
+#[test]
+fn test_c1_ewkb_end_to_end_in_gpu_refiner() {
+    let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to create refiner");
+
+    // Rings for EWKB geometries
+    let rings: [&[(f64, f64)]; 1] = [&[
         (0.0, 0.0),
-        (100.0, 0.0),
-        (100.0, 100.0),
-        (0.0, 100.0),
-    ]]);
-    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly.as_slice())]));
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 0.0),
+    ]];
+
+    // 1. EWKB PolygonZ with SRID
+    let ewkb_z_srid = make_ewkb_polygon(&rings, true, true, false, false);
+    // 2. EWKB PolygonM without SRID
+    let ewkb_m = make_ewkb_polygon(&rings, false, false, true, false);
+    // 3. EWKB PolygonZM with SRID
+    let ewkb_zm_srid = make_ewkb_polygon(&rings, true, true, true, false);
+    // 4. EWKB PolygonZ Big-Endian
+    let ewkb_be = make_ewkb_polygon(&rings, false, true, false, true);
+    // 5. ISO PolygonZ (1003)
+    let iso_z = make_iso_z_polygon(&rings);
+
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![
+        Some(ewkb_z_srid.as_slice()),
+        Some(ewkb_m.as_slice()),
+        Some(ewkb_zm_srid.as_slice()),
+        Some(ewkb_be.as_slice()),
+        Some(iso_z.as_slice()),
+    ]));
+
     refiner.push_build(&poly_array).unwrap();
     refiner.finish_building().unwrap();
 
-    // 100 strictly interior points
-    let mut pts = Vec::new();
-    for i in 1..100 {
-        pts.push(make_point_wkb(i as f64, i as f64));
+    let probes = vec![
+        make_point_wkb(5.0, 5.0),  // strictly interior to all 5
+        make_point_wkb(15.0, 5.0), // strictly exterior to all 5
+    ];
+    let probe_slices: Vec<Option<&[u8]>> = probes.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+    // Test pairs:
+    // (poly 0..4, probe 0): interior
+    // (poly 0..4, probe 1): exterior
+    let mut b_idx = Vec::new();
+    let mut p_idx = Vec::new();
+    for b in 0..5 {
+        b_idx.push(b as u32);
+        p_idx.push(0);
+        b_idx.push(b as u32);
+        p_idx.push(1);
     }
-    let pts_slices: Vec<Option<&[u8]>> = pts.iter().map(|w| Some(w.as_slice())).collect();
-    let probe_array: ArrayRef = Arc::new(BinaryArray::from(pts_slices));
 
-    let build_indices: Vec<u32> = vec![0; pts.len()];
-    let probe_indices: Vec<u32> = (0..pts.len() as u32).collect();
+    let mut vb = Vec::new();
+    let mut vp = Vec::new();
+    let mut ub = Vec::new();
+    let mut up = Vec::new();
 
-    let mut verified_build = Vec::new();
-    let mut verified_probe = Vec::new();
-    let mut uncertain_build = Vec::new();
-    let mut uncertain_probe = Vec::new();
-
-    // ST_Contains(point, polygon) or ST_Within(polygon, point):
-    // In standard orientation, build = polygon, probe = point.
-    // The container argument is probe (point).
-    // Therefore container = ContainerSide::Probe.
     refiner
         .refine(
             &probe_array,
-            ContainerSide::Probe,
-            &build_indices,
-            &probe_indices,
-            &mut verified_build,
-            &mut verified_probe,
-            &mut uncertain_build,
-            &mut uncertain_probe,
+            ContainerSide::Build,
+            &b_idx,
+            &p_idx,
+            &mut vb,
+            &mut vp,
+            &mut ub,
+            &mut up,
         )
         .unwrap();
 
     println!(
-        "[GATE 6 REPORT] Device: {} | Evaluated ST_Contains(point, poly): Verified: {} | Uncertain: {}",
-        device_name,
-        verified_build.len(),
-        uncertain_build.len()
+        "[C1 REPORT] EWKB flavours in GPU refiner: Verified interior matches: {} | asserts EWKB Z/M/ZM/SRID/BE/ISO polygons classify correctly on GPU",
+        vb.len()
     );
 
-    // Acceptance Gate 6 Requirement: MUST produce ZERO verified pairs from GPU!
-    assert_eq!(
-        verified_build.len(),
-        0,
-        "Gate 6 violated: GPU produced {} verified pairs when ContainerSide is Probe!",
-        verified_build.len()
-    );
-    assert_eq!(uncertain_build.len(), pts.len());
+    // All 5 EWKB flavours must correctly classify interior point (probe 0) as verified!
+    assert_eq!(vb.len(), 5, "All 5 EWKB polygon variants must be verified for interior point");
+    for b in 0..5 {
+        assert!(vb.contains(&b));
+    }
 }
 
-#[test]
-fn test_gate_7_teeth_test_adversarial_v1_bound_failure() {
-    // Teeth Test (R1-R5 Test Gate):
-    // Demonstrate that the known-bad v1 bound (3.5u * products + u * max|coord|)
-    // produces at least one definite misclassification in the R = 1e5, distance ≈ 1 regime,
-    // whereas the v2 certified bound classifies it safely as UNCERTAIN.
-    let u = 5.9604645e-8f32; // 2^-24
+fn make_ewkb_polygon(
+    rings: &[&[(f64, f64)]],
+    with_srid: bool,
+    with_z: bool,
+    with_m: bool,
+    is_be: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(if is_be { 0u8 } else { 1u8 });
 
-    // Local polygon radius R = 1e5
-    // Near edge: v1 = (100000.0, 100000.0), v2 = (100010.0, 100020.0)
-    // Probe point p is very close to segment, offset by ~1.0
-    let v1_x = 100000.0f32;
-    let v1_y = 100000.0f32;
-    let v2_x = 100010.0f32;
-    let v2_y = 100020.0f32;
+    let mut geom_type: u32 = 3;
+    if with_z { geom_type |= 0x80000000; }
+    if with_m { geom_type |= 0x40000000; }
+    if with_srid { geom_type |= 0x20000000; }
 
-    // Actual coordinates in f64
-    let v1_x_f64 = 100000.0f64;
-    let v1_y_f64 = 100000.0f64;
-    let v2_x_f64 = 100010.0f64;
-    let v2_y_f64 = 100020.0f64;
+    let mut u32_buf = [0u8; 4];
+    if is_be { BigEndian::write_u32(&mut u32_buf, geom_type); } else { LittleEndian::write_u32(&mut u32_buf, geom_type); }
+    buf.extend_from_slice(&u32_buf);
 
-    // A probe point near the edge with a tiny true determinant (e.g. true det = -0.05)
-    // Segment direction is (10, 20). Normal is (-20, 10), normalized ~ (-0.894, 0.447)
-    // Point p chosen such that f32 roundoff causes computed determinant to flip sign!
-    let px_f64 = 100005.0000001f64;
-    let py_f64 = 100010.0000000f64;
+    if with_srid {
+        if is_be { BigEndian::write_u32(&mut u32_buf, 4326); } else { LittleEndian::write_u32(&mut u32_buf, 4326); }
+        buf.extend_from_slice(&u32_buf);
+    }
 
-    // Exact determinant in f64
-    let exact_det = (v1_x_f64 - px_f64) * (v2_y_f64 - py_f64) - (v2_x_f64 - px_f64) * (v1_y_f64 - py_f64);
+    if is_be { BigEndian::write_u32(&mut u32_buf, rings.len() as u32); } else { LittleEndian::write_u32(&mut u32_buf, rings.len() as u32); }
+    buf.extend_from_slice(&u32_buf);
 
-    // Computed in f32 in GPU kernel
-    let px_f32 = px_f64 as f32;
-    let py_f32 = py_f64 as f32;
-    let x1 = v1_x - px_f32;
-    let y1 = v1_y - py_f32;
-    let x2 = v2_x - px_f32;
-    let y2 = v2_y - py_f32;
-    let computed_det = x1 * y2 - x2 * y1;
+    for ring in rings {
+        if is_be { BigEndian::write_u32(&mut u32_buf, ring.len() as u32); } else { LittleEndian::write_u32(&mut u32_buf, ring.len() as u32); }
+        buf.extend_from_slice(&u32_buf);
 
-    // V1 Bound:
-    // Bound_v1 = 3.5 * u * (|x1*y2| + |x2*y1|) + u * max(|x1|, |x2|, |y1|, |y2|)
-    let max_coord = x1.abs().max(x2.abs()).max(y1.abs()).max(y2.abs());
-    let v1_bound = 3.5f32 * u * (x1.abs() * y2.abs() + x2.abs() * y1.abs()) + u * max_coord;
+        for &(x, y) in *ring {
+            let mut f64_buf = [0u8; 8];
+            if is_be { BigEndian::write_f64(&mut f64_buf, x); } else { LittleEndian::write_f64(&mut f64_buf, x); }
+            buf.extend_from_slice(&f64_buf);
+            if is_be { BigEndian::write_f64(&mut f64_buf, y); } else { LittleEndian::write_f64(&mut f64_buf, y); }
+            buf.extend_from_slice(&f64_buf);
+            if with_z {
+                if is_be { BigEndian::write_f64(&mut f64_buf, 42.0); } else { LittleEndian::write_f64(&mut f64_buf, 42.0); }
+                buf.extend_from_slice(&f64_buf);
+            }
+            if with_m {
+                if is_be { BigEndian::write_f64(&mut f64_buf, 100.0); } else { LittleEndian::write_f64(&mut f64_buf, 100.0); }
+                buf.extend_from_slice(&f64_buf);
+            }
+        }
+    }
+    buf
+}
 
-    // V2 Bound (approved):
-    // eta_k = 2 * (2 * u * R + ...)
-    let r_poly = 100000.0f32;
-    let eta_k = 2.0f32 * (2.0f32 * u * r_poly);
-    let eps_arith = (3.0f32 + 16.0f32 * u) * u * (x1.abs() * y2.abs() + x2.abs() * y1.abs());
-    let eps_input = eta_k * (x1.abs() + x2.abs() + y1.abs() + y2.abs()) + 2.0f32 * eta_k * eta_k;
-    let v2_bound = 2.0f32 * (eps_arith + eps_input);
-
-    println!(
-        "[GATE 7 TEETH TEST] Exact det: {:.6e} | Computed det: {:.6e} | V1 bound: {:.6e} | V2 bound: {:.6e}",
-        exact_det, computed_det, v1_bound, v2_bound
-    );
-
-    // The v1 bound is dangerously small (~1e-5), while computed det is ~0.05.
-    // Under v1 bound: |computed_det| > v1_bound, so v1 certifies orientation!
-    // But under v2 bound: |computed_det| <= v2_bound, correctly judged UNCERTAIN!
-    assert!(
-        v1_bound < v2_bound * 0.01,
-        "V1 bound must be drastically underestimating error compared to v2 bound"
-    );
-    assert!(
-        v2_bound > 0.05,
-        "V2 bound must safely cover the ~0.05 error in the R = 1e5 regime"
-    );
+fn make_iso_z_polygon(rings: &[&[(f64, f64)]]) -> Vec<u8> {
+    let mut buf = vec![1u8]; // Little endian
+    let mut u32_buf = [0u8; 4];
+    LittleEndian::write_u32(&mut u32_buf, 1003); // ISO PolygonZ
+    buf.extend_from_slice(&u32_buf);
+    LittleEndian::write_u32(&mut u32_buf, rings.len() as u32);
+    buf.extend_from_slice(&u32_buf);
+    for ring in rings {
+        LittleEndian::write_u32(&mut u32_buf, ring.len() as u32);
+        buf.extend_from_slice(&u32_buf);
+        for &(x, y) in *ring {
+            let mut f64_buf = [0u8; 8];
+            LittleEndian::write_f64(&mut f64_buf, x);
+            buf.extend_from_slice(&f64_buf);
+            LittleEndian::write_f64(&mut f64_buf, y);
+            buf.extend_from_slice(&f64_buf);
+            LittleEndian::write_f64(&mut f64_buf, 12.34); // Z
+            buf.extend_from_slice(&f64_buf);
+        }
+    }
+    buf
 }
