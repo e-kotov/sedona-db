@@ -286,3 +286,19 @@ fn test_nan_inf_handling() {
     assert!(p_res3.is_empty());
 }
 
+#[test]
+fn test_error_handling_and_last_error() {
+    let mut index = MetalSpatialIndex::try_new().expect("Failed to create index");
+    let initial_err = index.last_error();
+    assert!(initial_err.is_empty() || !initial_err.contains("Null"));
+
+    // Push valid data
+    index.push_build(&[[0.0, 0.0, 1.0, 1.0]]).unwrap();
+    index.finish_building().unwrap();
+
+    let (b_res, p_res) = index.probe(&[[0.5, 0.5, 0.5, 0.5]]).unwrap();
+    assert_eq!(b_res.len(), 1);
+    assert_eq!(p_res.len(), 1);
+}
+
+

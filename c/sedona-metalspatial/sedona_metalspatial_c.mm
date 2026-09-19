@@ -46,10 +46,12 @@ int SedonaMetalIndexPushBuild(void* index, const float* rects, uint32_t count) {
     if (count > 0 && !rects) return -2;
     try {
         auto* idx = static_cast<MetalSpatialIndex*>(index);
-        idx->push_build(rects, count);
+        if (!idx->push_build(rects, count)) {
+            return -3;
+        }
         return 0;
     } catch (...) {
-        return -3;
+        return -4;
     }
 }
 
@@ -57,10 +59,12 @@ int SedonaMetalIndexFinish(void* index) {
     if (!index) return -1;
     try {
         auto* idx = static_cast<MetalSpatialIndex*>(index);
-        idx->finish_building();
+        if (!idx->finish_building()) {
+            return -2;
+        }
         return 0;
     } catch (...) {
-        return -2;
+        return -3;
     }
 }
 
@@ -81,7 +85,9 @@ int SedonaMetalIndexProbe(void* index, const float* rects, uint32_t count,
         auto* idx = static_cast<MetalSpatialIndex*>(index);
         std::vector<uint32_t> build_res;
         std::vector<uint32_t> probe_res;
-        idx->probe(rects, count, build_res, probe_res);
+        if (!idx->probe(rects, count, build_res, probe_res)) {
+            return -5;
+        }
 
         uint32_t num_matches = static_cast<uint32_t>(build_res.size());
         *out_len = num_matches;
@@ -122,6 +128,16 @@ void SedonaMetalIndexFree(void* index) {
             delete static_cast<MetalSpatialIndex*>(index);
         } catch (...) {
         }
+    }
+}
+
+const char* SedonaMetalIndexGetLastError(void* index) {
+    if (!index) return "Index handle is null";
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        return idx->get_last_error();
+    } catch (...) {
+        return "Internal exception reading last error";
     }
 }
 

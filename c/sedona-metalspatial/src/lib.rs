@@ -33,6 +33,7 @@ pub mod ffi {
         ) -> i32;
         pub fn SedonaMetalIndexFreeResults(out_build: *mut u32, out_probe: *mut u32);
         pub fn SedonaMetalIndexFree(index: *mut c_void);
+        pub fn SedonaMetalIndexGetLastError(index: *mut c_void) -> *const std::ffi::c_char;
     }
 }
 
@@ -40,16 +41,16 @@ pub mod ffi {
 pub enum MetalSpatialError {
     #[error("Metal spatial engine is only supported on macOS")]
     PlatformNotSupported,
-    #[error("Failed to create Metal spatial index")]
-    CreationFailed,
-    #[error("Failed to push build rectangles: code {0}")]
-    PushBuildFailed(i32),
-    #[error("Failed to finish building index: code {0}")]
-    FinishFailed(i32),
-    #[error("Probe failed: code {0}")]
-    ProbeFailed(i32),
-    #[error("Null pointer or invalid state")]
-    InvalidState,
+    #[error("Failed to create Metal spatial index: {0}")]
+    CreationFailed(String),
+    #[error("Failed to push build rectangles: code {code}: {msg}")]
+    PushBuildFailed { code: i32, msg: String },
+    #[error("Failed to finish building index: code {code}: {msg}")]
+    FinishFailed { code: i32, msg: String },
+    #[error("Probe failed: code {code}: {msg}")]
+    ProbeFailed { code: i32, msg: String },
+    #[error("Null pointer or invalid state: {0}")]
+    InvalidState(String),
 }
 
 pub struct MetalSpatialIndex {
@@ -63,14 +64,42 @@ impl MetalSpatialIndex {
         let mut raw = std::ptr::null_mut();
         let rc = unsafe { ffi::SedonaMetalIndexCreate(&mut raw) };
         if rc != 0 || raw.is_null() {
-            return Err(MetalSpatialError::CreationFailed);
+            let msg = if !raw.is_null() {
+                let err_msg = unsafe {
+                    let ptr = ffi::SedonaMetalIndexGetLastError(raw);
+                    if ptr.is_null() {
+                        "Initialization failed".to_string()
+                    } else {
+                        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                    }
+                };
+                unsafe { ffi::SedonaMetalIndexFree(raw) };
+                err_msg
+            } else {
+                "Failed to allocate Metal index".to_string()
+            };
+            return Err(MetalSpatialError::CreationFailed(msg));
         }
         Ok(Self { raw })
     }
 
+    pub fn last_error(&self) -> String {
+        if self.raw.is_null() {
+            return "Null index pointer".to_string();
+        }
+        unsafe {
+            let ptr = ffi::SedonaMetalIndexGetLastError(self.raw);
+            if ptr.is_null() {
+                "Unknown error".to_string()
+            } else {
+                std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        }
+    }
+
     pub fn push_build(&mut self, rects: &[[f32; 4]]) -> Result<(), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState);
+            return Err(MetalSpatialError::InvalidState("Index is null".to_string()));
         }
         if rects.is_empty() {
             return Ok(());
@@ -83,25 +112,27 @@ impl MetalSpatialIndex {
             )
         };
         if rc != 0 {
-            return Err(MetalSpatialError::PushBuildFailed(rc));
+            let msg = self.last_error();
+            return Err(MetalSpatialError::PushBuildFailed { code: rc, msg });
         }
         Ok(())
     }
 
     pub fn finish_building(&mut self) -> Result<(), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState);
+            return Err(MetalSpatialError::InvalidState("Index is null".to_string()));
         }
         let rc = unsafe { ffi::SedonaMetalIndexFinish(self.raw) };
         if rc != 0 {
-            return Err(MetalSpatialError::FinishFailed(rc));
+            let msg = self.last_error();
+            return Err(MetalSpatialError::FinishFailed { code: rc, msg });
         }
         Ok(())
     }
 
     pub fn probe(&self, rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState);
+            return Err(MetalSpatialError::InvalidState("Index is null".to_string()));
         }
         if rects.is_empty() {
             return Ok((Vec::new(), Vec::new()));
@@ -123,13 +154,14 @@ impl MetalSpatialIndex {
         };
 
         if rc != 0 {
-            return Err(MetalSpatialError::ProbeFailed(rc));
+            let msg = self.last_error();
+            return Err(MetalSpatialError::ProbeFailed { code: rc, msg });
         }
 
         let (build_vec, probe_vec) = if out_len > 0 {
             if out_build.is_null() || out_probe.is_null() {
                 unsafe { ffi::SedonaMetalIndexFreeResults(out_build, out_probe) };
-                return Err(MetalSpatialError::InvalidState);
+                return Err(MetalSpatialError::InvalidState("Probe returned null buffers with non-zero count".to_string()));
             }
             let b_slice = unsafe { std::slice::from_raw_parts(out_build, out_len as usize) };
             let p_slice = unsafe { std::slice::from_raw_parts(out_probe, out_len as usize) };

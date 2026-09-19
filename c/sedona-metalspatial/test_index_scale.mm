@@ -585,6 +585,27 @@ void test_nan_inf_cases(id<MTLDevice> device) {
     std::cout << "  NaN, Inf & Inverted Bounds Handling: PASS (all engines, positional integrity verified)\n";
 }
 
+// =====================================================================
+// Test 7: Error Handling & Diagnostics (Item 1.3)
+// =====================================================================
+void test_error_handling(id<MTLDevice> device) {
+    std::cout << "\n--- Test 7: Error Handling & Diagnostics (Item 1.3) ---\n";
+    MetalSpatialIndex index(device);
+    assert(index.is_valid());
+
+    std::vector<uint32_t> b, p;
+    bool ok = index.probe(nullptr, 10, b, p);
+    assert(!ok);
+    assert(strlen(index.get_last_error()) > 0);
+    std::cout << "  Null probe error captured: " << index.get_last_error() << "\n";
+
+    bool push_ok = index.push_build(nullptr, 5);
+    assert(!push_ok);
+    assert(strlen(index.get_last_error()) > 0);
+    std::cout << "  Null push_build error captured: " << index.get_last_error() << "\n";
+    std::cout << "  Error Handling & Diagnostics: PASS\n";
+}
+
 int main() {
     @autoreleasepool {
         std::cout << "========================================================\n";
@@ -609,6 +630,7 @@ int main() {
         test_edge_cases(device);
         test_rt_hash_parity(device);
         test_nan_inf_cases(device);
+        test_error_handling(device);
 
         auto suite_t1 = std::chrono::high_resolution_clock::now();
         double total_suite_s = std::chrono::duration<double>(suite_t1 - suite_t0).count();

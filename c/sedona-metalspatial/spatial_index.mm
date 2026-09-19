@@ -265,9 +265,21 @@ struct MetalSpatialIndex::Impl {
     id<MTLBuffer> buf_grid_offsets = nil;
     id<MTLBuffer> buf_grid_entries = nil;
 
-    // Diagnostics
+    // Diagnostics / Errors
     double last_build_time_ms = 0.0;
     std::atomic<double> last_probe_time_ms{0.0};
+    std::string last_error;
+    std::mutex error_mutex;
+
+    void set_last_error(const std::string& err) {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        last_error = err;
+    }
+
+    std::string get_last_error() {
+        std::lock_guard<std::mutex> lock(error_mutex);
+        return last_error;
+    }
 
     void init_pipelines() {
         @autoreleasepool {
@@ -289,7 +301,7 @@ struct MetalSpatialIndex::Impl {
             NSString *hashSrc = [NSString stringWithUTF8String:SPATIAL_HASH_METAL_SOURCE];
             id<MTLLibrary> hashLib = [device newLibraryWithSource:hashSrc options:opts error:&err];
             if (!hashLib) {
-                std::cerr << "Error compiling Spatial Hash shaders: " << [[err localizedDescription] UTF8String] << "\n";
+                set_last_error(std::string("Error compiling Spatial Hash shaders: ") + [[err localizedDescription] UTF8String]);
             } else {
                 id<MTLFunction> fnCount = [hashLib newFunctionWithName:@"count_cell_entries"];
                 id<MTLFunction> fnPop = [hashLib newFunctionWithName:@"populate_cells"];
@@ -297,6 +309,9 @@ struct MetalSpatialIndex::Impl {
                 pso_grid_count = [device newComputePipelineStateWithFunction:fnCount error:&err];
                 pso_grid_populate = [device newComputePipelineStateWithFunction:fnPop error:&err];
                 pso_grid_probe = [device newComputePipelineStateWithFunction:fnProbe error:&err];
+                if (!pso_grid_count || !pso_grid_populate || !pso_grid_probe) {
+                    set_last_error(std::string("Error creating Spatial Hash PSOs: ") + (err ? [[err localizedDescription] UTF8String] : "unknown"));
+                }
             }
 
             // 2. Compile Hardware Ray Tracing Shaders (if supported)
@@ -304,13 +319,11 @@ struct MetalSpatialIndex::Impl {
                 NSString *rtSrc = [NSString stringWithUTF8String:BVH_METAL_SOURCE];
                 id<MTLLibrary> rtLib = [device newLibraryWithSource:rtSrc options:opts error:&err];
                 if (!rtLib) {
-                    std::cerr << "Hardware RT shader compilation notice: " << [[err localizedDescription] UTF8String] << "\n";
                     has_hw_rt = false;
                 } else {
                     id<MTLFunction> fnRtProbe = [rtLib newFunctionWithName:@"rt_probe_points"];
                     pso_rt_probe = [device newComputePipelineStateWithFunction:fnRtProbe error:&err];
                     if (!pso_rt_probe) {
-                        std::cerr << "Hardware RT PSO error: " << [[err localizedDescription] UTF8String] << "\n";
                         has_hw_rt = false;
                     }
                 }
@@ -318,10 +331,10 @@ struct MetalSpatialIndex::Impl {
         }
     }
 
-    void build_rt_index() {
+    bool build_rt_index() {
         @autoreleasepool {
             uint32_t n = static_cast<uint32_t>(build_boxes.size());
-            if (n == 0) return;
+            if (n == 0) return true;
             std::vector<MTLAxisAlignedBoundingBox> mtl_boxes(n);
             // Expand conservative bounds to prevent grazing-ray precision misses on boundaries across any coordinate scale
             for (uint32_t i = 0; i < n; ++i) {
@@ -341,6 +354,10 @@ struct MetalSpatialIndex::Impl {
             buf_rt_bboxes = [device newBufferWithBytes:mtl_boxes.data()
                                                 length:sizeof(MTLAxisAlignedBoundingBox) * n
                                                options:MTLResourceStorageModeShared];
+            if (!buf_rt_bboxes) {
+                set_last_error("Failed to allocate RT bounding box buffer");
+                return false;
+            }
 
             MTLAccelerationStructureBoundingBoxGeometryDescriptor *geomDesc =
                 [MTLAccelerationStructureBoundingBoxGeometryDescriptor descriptor];
@@ -358,22 +375,44 @@ struct MetalSpatialIndex::Impl {
             NSUInteger scratchSize = std::max(sizes.buildScratchBufferSize, (NSUInteger)256);
 
             rt_accel = [device newAccelerationStructureWithSize:accelSize];
+            if (!rt_accel) {
+                set_last_error("Failed to allocate RT acceleration structure");
+                return false;
+            }
             id<MTLBuffer> scratch = [device newBufferWithLength:scratchSize
                                                         options:MTLResourceStorageModePrivate];
+            if (!scratch) {
+                set_last_error("Failed to allocate RT scratch buffer");
+                return false;
+            }
 
             id<MTLCommandBuffer> cmd = [queue commandBuffer];
+            if (!cmd) {
+                set_last_error("Failed to create command buffer for RT build");
+                return false;
+            }
             id<MTLAccelerationStructureCommandEncoder> enc = [cmd accelerationStructureCommandEncoder];
+            if (!enc) {
+                set_last_error("Failed to create RT acceleration structure encoder");
+                return false;
+            }
             [enc buildAccelerationStructure:rt_accel descriptor:accelDesc scratchBuffer:scratch scratchBufferOffset:0];
             [enc endEncoding];
             [cmd commit];
             [cmd waitUntilCompleted];
+            if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                NSString* errStr = [cmd.error localizedDescription] ?: @"Error during RT BVH build";
+                set_last_error([errStr UTF8String]);
+                return false;
+            }
+            return true;
         }
     }
 
-    void build_grid_index() {
+    bool build_grid_index() {
         @autoreleasepool {
             uint32_t n = static_cast<uint32_t>(build_boxes.size());
-            if (n == 0) return;
+            if (n == 0) return true;
             float min_x = 1e30f, min_y = 1e30f, max_x = -1e30f, max_y = -1e30f;
             uint32_t valid_count = 0;
             for (uint32_t i = 0; i < n; ++i) {
@@ -404,7 +443,11 @@ struct MetalSpatialIndex::Impl {
                                                       options:MTLResourceStorageModeShared];
                 buf_grid_entries = [device newBufferWithLength:sizeof(uint32_t)
                                                        options:MTLResourceStorageModeShared];
-                return;
+                if (!buf_grid_offsets || !buf_grid_entries) {
+                    set_last_error("Failed to allocate empty grid buffers");
+                    return false;
+                }
+                return true;
             }
 
             // Grid resolution: heuristically balance cell occupancy
@@ -426,19 +469,39 @@ struct MetalSpatialIndex::Impl {
                 buf_build_boxes = [device newBufferWithBytes:build_boxes.data()
                                                       length:sizeof(BoundingBox) * n
                                                      options:MTLResourceStorageModeShared];
+                if (!buf_build_boxes) {
+                    set_last_error("Failed to allocate build boxes buffer");
+                    return false;
+                }
             }
 
             id<MTLBuffer> buf_counts = [device newBufferWithLength:sizeof(uint32_t) * num_cells
                                                            options:MTLResourceStorageModeShared];
+            if (!buf_counts) {
+                set_last_error("Failed to allocate grid counts buffer");
+                return false;
+            }
             memset([buf_counts contents], 0, sizeof(uint32_t) * num_cells);
 
             id<MTLBuffer> buf_params = [device newBufferWithBytes:&grid_params
                                                            length:sizeof(GridParamsInternal)
                                                           options:MTLResourceStorageModeShared];
+            if (!buf_params) {
+                set_last_error("Failed to allocate grid params buffer");
+                return false;
+            }
 
             // 1. Count entries per cell
             id<MTLCommandBuffer> cmd1 = [queue commandBuffer];
+            if (!cmd1) {
+                set_last_error("Failed to create command buffer for count pass");
+                return false;
+            }
             id<MTLComputeCommandEncoder> enc1 = [cmd1 computeCommandEncoder];
+            if (!enc1) {
+                set_last_error("Failed to create compute command encoder for count pass");
+                return false;
+            }
             [enc1 setComputePipelineState:pso_grid_count];
             [enc1 setBuffer:buf_build_boxes offset:0 atIndex:0];
             [enc1 setBuffer:buf_counts offset:0 atIndex:1];
@@ -447,6 +510,11 @@ struct MetalSpatialIndex::Impl {
             [enc1 endEncoding];
             [cmd1 commit];
             [cmd1 waitUntilCompleted];
+            if ([cmd1 status] != MTLCommandBufferStatusCompleted) {
+                NSString* errStr = [cmd1.error localizedDescription] ?: @"Error during count pass";
+                set_last_error([errStr UTF8String]);
+                return false;
+            }
 
             // 2. Prefix sum for cell offsets
             uint32_t* counts = (uint32_t*)[buf_counts contents];
@@ -459,17 +527,32 @@ struct MetalSpatialIndex::Impl {
             buf_grid_offsets = [device newBufferWithBytes:offsets.data()
                                                    length:sizeof(uint32_t) * (num_cells + 1)
                                                   options:MTLResourceStorageModeShared];
-
             buf_grid_entries = [device newBufferWithLength:sizeof(uint32_t) * std::max(1u, total_entries)
                                                    options:MTLResourceStorageModeShared];
+            if (!buf_grid_offsets || !buf_grid_entries) {
+                set_last_error("Failed to allocate grid offsets or entries buffer");
+                return false;
+            }
 
             id<MTLBuffer> buf_heads = [device newBufferWithLength:sizeof(uint32_t) * num_cells
                                                           options:MTLResourceStorageModeShared];
+            if (!buf_heads) {
+                set_last_error("Failed to allocate grid heads buffer");
+                return false;
+            }
             memset([buf_heads contents], 0, sizeof(uint32_t) * num_cells);
 
             // 3. Populate cell entries
             id<MTLCommandBuffer> cmd2 = [queue commandBuffer];
+            if (!cmd2) {
+                set_last_error("Failed to create command buffer for populate pass");
+                return false;
+            }
             id<MTLComputeCommandEncoder> enc2 = [cmd2 computeCommandEncoder];
+            if (!enc2) {
+                set_last_error("Failed to create compute command encoder for populate pass");
+                return false;
+            }
             [enc2 setComputePipelineState:pso_grid_populate];
             [enc2 setBuffer:buf_build_boxes offset:0 atIndex:0];
             [enc2 setBuffer:buf_heads offset:0 atIndex:1];
@@ -480,6 +563,12 @@ struct MetalSpatialIndex::Impl {
             [enc2 endEncoding];
             [cmd2 commit];
             [cmd2 waitUntilCompleted];
+            if ([cmd2 status] != MTLCommandBufferStatusCompleted) {
+                NSString* errStr = [cmd2.error localizedDescription] ?: @"Error during populate pass";
+                set_last_error([errStr UTF8String]);
+                return false;
+            }
+            return true;
         }
     }
 };
@@ -519,11 +608,22 @@ bool MetalSpatialIndex::supports_hardware_rt() const {
 }
 
 bool MetalSpatialIndex::is_valid() const {
-    return impl_->device != nil && impl_->queue != nil;
+    if (!impl_->device || !impl_->queue) return false;
+    if (!impl_->pso_grid_count || !impl_->pso_grid_populate || !impl_->pso_grid_probe) {
+        return false;
+    }
+    if (impl_->has_hw_rt && !impl_->pso_rt_probe) {
+        return false;
+    }
+    return true;
 }
 
-void MetalSpatialIndex::push_build(const float* rects_flat, uint32_t count) {
-    if (!rects_flat || count == 0) return;
+bool MetalSpatialIndex::push_build(const float* rects_flat, uint32_t count) {
+    if (count > 0 && !rects_flat) {
+        impl_->set_last_error("Null rects pointer with non-zero count");
+        return false;
+    }
+    if (count == 0) return true;
     const auto* boxes = reinterpret_cast<const BoundingBox*>(rects_flat);
     impl_->build_boxes.insert(impl_->build_boxes.end(), boxes, boxes + count);
     impl_->is_built.store(false);
@@ -532,10 +632,15 @@ void MetalSpatialIndex::push_build(const float* rects_flat, uint32_t count) {
     impl_->buf_rt_bboxes = nil;
     impl_->buf_grid_offsets = nil;
     impl_->buf_grid_entries = nil;
+    return true;
 }
 
-void MetalSpatialIndex::finish_building() {
-    if (impl_->build_boxes.empty() || impl_->is_built.load()) return;
+bool MetalSpatialIndex::finish_building() {
+    if (impl_->build_boxes.empty() || impl_->is_built.load()) return true;
+    if (!is_valid()) {
+        impl_->set_last_error("Index is invalid (missing device, queue or pipeline state)");
+        return false;
+    }
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -543,32 +648,50 @@ void MetalSpatialIndex::finish_building() {
     impl_->buf_build_boxes = [impl_->device newBufferWithBytes:impl_->build_boxes.data()
                                                         length:sizeof(BoundingBox) * n
                                                        options:MTLResourceStorageModeShared];
+    if (!impl_->buf_build_boxes) {
+        impl_->set_last_error("Failed to allocate build boxes buffer");
+        return false;
+    }
 
     // Build Spatial Hash Grid (always available as universal engine / fast fallback)
-    impl_->build_grid_index();
+    if (!impl_->build_grid_index()) {
+        return false;
+    }
 
     // If Hardware RT is requested or Auto, build Hardware BVH
     if (impl_->has_hw_rt && (impl_->requested_type == IndexType::HardwareRT || impl_->requested_type == IndexType::Auto)) {
-        impl_->build_rt_index();
+        if (!impl_->build_rt_index()) {
+            return false;
+        }
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
     impl_->last_build_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     impl_->is_built.store(true);
+    return true;
 }
 
-void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
+bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                               std::vector<uint32_t>& out_build, std::vector<uint32_t>& out_probe)
 {
     out_build.clear();
     out_probe.clear();
-    if (!rects_flat || count == 0 || impl_->build_boxes.empty()) return;
-    if (!impl_->device || !impl_->queue) return;
+    if (count > 0 && !rects_flat) {
+        impl_->set_last_error("Null rects pointer with non-zero count");
+        return false;
+    }
+    if (count == 0 || impl_->build_boxes.empty()) return true;
+    if (!is_valid()) {
+        impl_->set_last_error("Index is invalid (missing device, queue or pipeline state)");
+        return false;
+    }
 
     if (!impl_->is_built.load(std::memory_order_acquire)) {
         std::lock_guard<std::mutex> lock(impl_->build_mutex);
         if (!impl_->is_built.load(std::memory_order_relaxed)) {
-            finish_building();
+            if (!finish_building()) {
+                return false;
+            }
         }
     }
 
@@ -588,9 +711,6 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
         // Determine active engine
         bool use_rt = false;
         if (impl_->requested_type == IndexType::HardwareRT) {
-            // Hardware RT traverses 1D rays along Z, perfectly suited for points.
-            // If probe geometries are 2D boxes, seamlessly fall back to Spatial Hash
-            // to ensure 100% geometric correctness without false negatives.
             use_rt = impl_->has_hw_rt && (impl_->rt_accel != nil) && is_points;
         } else if (impl_->requested_type == IndexType::Auto) {
             use_rt = impl_->has_hw_rt && (impl_->rt_accel != nil) && is_points;
@@ -603,23 +723,41 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
         id<MTLBuffer> buf_probe = [impl_->device newBufferWithBytes:rects_flat
                                                              length:sizeof(BoundingBox) * count
                                                             options:MTLResourceStorageModeShared];
-        if (!buf_probe) return;
+        if (!buf_probe) {
+            impl_->set_last_error("Failed to allocate probe buffer");
+            return false;
+        }
 
         uint32_t max_results = std::max(count * 8u, 1000000u);
-        __block id<MTLBuffer> buf_out = [impl_->device newBufferWithLength:sizeof(MatchPair) * max_results
-                                                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_out = [impl_->device newBufferWithLength:sizeof(MatchPair) * max_results
+                                                           options:MTLResourceStorageModeShared];
         id<MTLBuffer> buf_count = [impl_->device newBufferWithLength:sizeof(uint32_t)
                                                              options:MTLResourceStorageModeShared];
-        if (!buf_out || !buf_count || ![buf_count contents] || ![buf_out contents]) return;
+        if (!buf_out || !buf_count || ![buf_count contents] || ![buf_out contents]) {
+            impl_->set_last_error("Failed to allocate match result buffers");
+            return false;
+        }
         *((uint32_t*)[buf_count contents]) = 0;
 
-        auto dispatch_query = ^(uint32_t curr_max) {
+        auto dispatch_query = [&](uint32_t curr_max) -> bool {
             if (use_rt) {
                 id<MTLBuffer> buf_num_probes = [impl_->device newBufferWithBytes:&count length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
                 id<MTLBuffer> buf_max_results = [impl_->device newBufferWithBytes:&curr_max length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+                if (!buf_num_probes || !buf_max_results) {
+                    impl_->set_last_error("Failed to allocate query parameter buffers");
+                    return false;
+                }
 
                 id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+                if (!cmd) {
+                    impl_->set_last_error("Failed to create probe command buffer");
+                    return false;
+                }
                 id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (!enc) {
+                    impl_->set_last_error("Failed to create probe compute command encoder");
+                    return false;
+                }
                 [enc setComputePipelineState:impl_->pso_rt_probe];
                 [enc setAccelerationStructure:impl_->rt_accel atBufferIndex:0];
                 [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:1];
@@ -632,6 +770,12 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                 [enc endEncoding];
                 [cmd commit];
                 [cmd waitUntilCompleted];
+                if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                    NSString* errStr = [cmd.error localizedDescription] ?: @"Error during RT probe execution";
+                    impl_->set_last_error([errStr UTF8String]);
+                    return false;
+                }
+                return true;
             } else {
                 GridParamsInternal params = impl_->grid_params;
                 params.num_probe = count;
@@ -640,9 +784,21 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                 id<MTLBuffer> buf_params = [impl_->device newBufferWithBytes:&params
                                                                       length:sizeof(GridParamsInternal)
                                                                      options:MTLResourceStorageModeShared];
+                if (!buf_params) {
+                    impl_->set_last_error("Failed to allocate grid params buffer");
+                    return false;
+                }
 
                 id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+                if (!cmd) {
+                    impl_->set_last_error("Failed to create probe command buffer");
+                    return false;
+                }
                 id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                if (!enc) {
+                    impl_->set_last_error("Failed to create probe compute command encoder");
+                    return false;
+                }
                 [enc setComputePipelineState:impl_->pso_grid_probe];
                 [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:0];
                 [enc setBuffer:buf_probe offset:0 atIndex:1];
@@ -655,21 +811,32 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
                 [enc endEncoding];
                 [cmd commit];
                 [cmd waitUntilCompleted];
+                if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                    NSString* errStr = [cmd.error localizedDescription] ?: @"Error during grid probe execution";
+                    impl_->set_last_error([errStr UTF8String]);
+                    return false;
+                }
+                return true;
             }
         };
 
-        dispatch_query(max_results);
+        if (!dispatch_query(max_results)) {
+            return false;
+        }
 
         uint32_t total_matches = *((uint32_t*)[buf_count contents]);
         if (total_matches > max_results) {
-            // Buffer capacity exceeded: dynamically reallocate exact needed capacity and re-run
-            // to guarantee zero truncation and 100% completeness.
             max_results = total_matches;
             buf_out = [impl_->device newBufferWithLength:sizeof(MatchPair) * max_results
                                                  options:MTLResourceStorageModeShared];
-            if (!buf_out || ![buf_out contents]) return;
+            if (!buf_out || ![buf_out contents]) {
+                impl_->set_last_error("Failed to reallocate match results buffer");
+                return false;
+            }
             *((uint32_t*)[buf_count contents]) = 0;
-            dispatch_query(max_results);
+            if (!dispatch_query(max_results)) {
+                return false;
+            }
             total_matches = *((uint32_t*)[buf_count contents]);
         }
 
@@ -685,7 +852,18 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
             out_build[i] = pairs[i].build_idx;
             out_probe[i] = pairs[i].probe_idx;
         }
+        return true;
     }
+}
+
+const char* MetalSpatialIndex::get_last_error() const {
+    static thread_local std::string s_err;
+    s_err = impl_->get_last_error();
+    return s_err.c_str();
+}
+
+void MetalSpatialIndex::set_last_error(const std::string& err) {
+    impl_->set_last_error(err);
 }
 
 double MetalSpatialIndex::get_last_build_time_ms() const {

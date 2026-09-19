@@ -31,6 +31,7 @@ int SedonaMetalIndexProbe(void* index, const float* rects, uint32_t count,
                           uint32_t** out_build, uint32_t** out_probe, uint32_t* out_len);
 void SedonaMetalIndexFreeResults(uint32_t* out_build, uint32_t* out_probe);
 void SedonaMetalIndexFree(void* index);
+const char* SedonaMetalIndexGetLastError(void* index);
 
 #ifdef __cplusplus
 }

@@ -46,15 +46,17 @@ public:
     bool is_valid() const;
 
     // SedonaDB Spatial Index API
-    void push_build(const float* rects_flat, uint32_t count);
-    void finish_building();
-    void probe(const float* rects_flat, uint32_t count,
+    bool push_build(const float* rects_flat, uint32_t count);
+    bool finish_building();
+    bool probe(const float* rects_flat, uint32_t count,
                std::vector<uint32_t>& out_build, std::vector<uint32_t>& out_probe);
 
-    // Diagnostics / performance metrics
+    // Diagnostics / performance metrics / errors
     double get_last_build_time_ms() const;
     double get_last_probe_time_ms() const;
     uint32_t get_build_count() const;
+    const char* get_last_error() const;
+    void set_last_error(const std::string& err);
     void clear();
 
 private:
