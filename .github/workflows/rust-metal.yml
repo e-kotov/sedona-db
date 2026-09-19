@@ -60,19 +60,14 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Phase 1 C++ Refiner Tests
-        working-directory: c/sedona-metalspatial
+      - name: Run sedona-metalspatial Tests (Gates 1-7, Flattener, Refiner, and Index)
         run: |
-          make test_refine
+          cargo test -p sedona-metalspatial -- --nocapture
 
-      - name: Run Phase 2 Scalable Spatial Index Tests
+      - name: Run C++ Scalable Spatial Index Tests (Hardware RT & Spatial Hash 50k x 50k)
         working-directory: c/sedona-metalspatial
         run: |
           make test_index_scale
-
-      - name: Run Phase 3 FFI Crate Tests (sedona-metalspatial)
-        run: |
-          cargo test -p sedona-metalspatial
 
       - name: Run Phase 4 End-to-End Integration Tests (sedona-spatial-join-gpu)
         run: |

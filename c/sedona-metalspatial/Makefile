@@ -19,31 +19,25 @@ CXX = clang++
 CXXFLAGS = -std=c++20 -O3 -Wall -Wextra -fobjc-arc
 LDFLAGS = -framework Metal -framework Foundation
 
-REFINE_BIN = test_refine_bin
+REFINE_BIN =
 INDEX_SCALE_BIN = test_index_scale_bin
 BENCH_DIR = bench
 POC_TARGET = $(BENCH_DIR)/poc_metal
 BENCH_HEAVY_BIN = $(BENCH_DIR)/test_large_scale_bench_bin
 
-all: metal_shaders.h $(REFINE_BIN) $(INDEX_SCALE_BIN)
+all: $(INDEX_SCALE_BIN)
 
-metal_shaders.h: bvh.metal spatial_hash.metal refine.metal
-	cargo check --package sedona-metalspatial
-
-$(REFINE_BIN): test_refine.mm refine.metal geom_types.hpp box_intersection.metal
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) test_refine.mm -o $(REFINE_BIN)
-
-$(INDEX_SCALE_BIN): test_index_scale.mm spatial_index.mm spatial_index.hpp metal_shaders.h
+$(INDEX_SCALE_BIN): test_index_scale.mm spatial_index.mm spatial_index.hpp
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) test_index_scale.mm spatial_index.mm -o $(INDEX_SCALE_BIN)
 
 $(POC_TARGET): $(BENCH_DIR)/main.mm box_intersection.metal
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(BENCH_DIR)/main.mm -o $(POC_TARGET)
 
-$(BENCH_HEAVY_BIN): $(BENCH_DIR)/test_large_scale_bench.mm spatial_index.mm spatial_index.hpp metal_shaders.h
+$(BENCH_HEAVY_BIN): $(BENCH_DIR)/test_large_scale_bench.mm spatial_index.mm spatial_index.hpp
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(BENCH_DIR)/test_large_scale_bench.mm spatial_index.mm -o $(BENCH_HEAVY_BIN)
 
-test_refine: $(REFINE_BIN)
-	./$(REFINE_BIN)
+test_refine:
+	cargo test -p sedona-metalspatial --test test_refine -- --nocapture
 
 test_index_scale: $(INDEX_SCALE_BIN)
 	./$(INDEX_SCALE_BIN)
@@ -53,6 +47,6 @@ bench: $(POC_TARGET) $(BENCH_HEAVY_BIN)
 	./$(BENCH_HEAVY_BIN)
 
 clean:
-	rm -rf $(REFINE_BIN) $(INDEX_SCALE_BIN) $(POC_TARGET) $(BENCH_HEAVY_BIN) *.o *.dSYM $(BENCH_DIR)/*.o $(BENCH_DIR)/*.dSYM
+	rm -rf $(INDEX_SCALE_BIN) $(POC_TARGET) $(BENCH_HEAVY_BIN) *.o *.dSYM $(BENCH_DIR)/*.o $(BENCH_DIR)/*.dSYM
 
 .PHONY: all clean test_refine test_index_scale bench
