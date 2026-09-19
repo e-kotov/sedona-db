@@ -36,6 +36,7 @@ const char* SedonaMetalIndexGetLastError(void* index);
 
 // Metal Spatial Refiner C-ABI
 int SedonaMetalRefinerCreate(void** out_refiner);
+int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode);
 int SedonaMetalRefinerPushPolygons(
     void* refiner,
     const void* polys, uint32_t poly_count,

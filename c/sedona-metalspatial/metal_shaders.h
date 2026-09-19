@@ -331,6 +331,10 @@ static const char* REFINE_METAL_SOURCE = R"RAW_SHADER(
 #include <metal_stdlib>
 using namespace metal;
 
+#ifndef BOUND_MODE
+#define BOUND_MODE 0 // 0: certified v2 (default), 1: flawed legacy v1
+#endif
+
 #define STATE_OUTSIDE 0
 #define STATE_INSIDE 1
 #define STATE_UNCERTAIN 2
@@ -413,13 +417,18 @@ inline uint32_t evaluate_ring(
         float x2 = v2.x - delta_x;
         float y2 = v2.y - delta_y;
 
+#if BOUND_MODE == 1
+        // Flawed v1: no ray straddle eta-band vertex trap
+#else
         // Section 2.4 Ray Straddle Vertex Protection:
         // Conservative eta_k-band rule:
+        // Applied to vertices with x >= -eta_k that could graze the positive x ray.
         // If |y1| <= eta_k or |y2| <= eta_k, a vertex lies within the ambiguity band
         // of the ray. Traps potential apex/vertex grazing to avoid false outside results.
-        if (metal::abs(y1) <= eta_k || metal::abs(y2) <= eta_k) {
+        if ((metal::abs(y1) <= eta_k && x1 >= -eta_k) || (metal::abs(y2) <= eta_k && x2 >= -eta_k)) {
             return STATE_UNCERTAIN;
         }
+#endif
 
         // Certified straddle check:
         // Because |y1| > eta_k and |y2| > eta_k, signs are certified.
@@ -429,9 +438,15 @@ inline uint32_t evaluate_ring(
             continue;
         }
 
-        // Section 2.3 Determinant and Forward Error Bound:
+        // Determinant
         float det = x1 * y2 - x2 * y1;
 
+#if BOUND_MODE == 1
+        // Flawed v1 determinant bound:
+        float max_coord = metal::max(metal::max(metal::abs(x1), metal::abs(x2)), metal::max(metal::abs(y1), metal::abs(y2)));
+        float bound_det = 3.5f * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1)) + u_flt * max_coord;
+#else
+        // Section 2.3 Determinant and Forward Error Bound (v2 approved):
         // Shewchuk's A-bound: eps_arith = (3 + 16u) * u * (|x1*y2| + |x2*y1|)
         float eps_arith = (3.0f + 16.0f * u_flt) * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1));
 
@@ -441,6 +456,7 @@ inline uint32_t evaluate_ring(
 
         // Total forward error bound with safety factor S = 2.0 (Section 2.3 D)
         float bound_det = 2.0f * (eps_arith + eps_input);
+#endif
 
         // Ambiguous orientation check
         if (metal::abs(det) <= bound_det) {
@@ -492,6 +508,8 @@ kernel void point_in_polygon_refine(
     }
 
     // Bounding box filter check
+    // Justification: Rounding is monotone, so p in [min, max] implies fl(p) in [fl(min), fl(max)].
+    // The +/- eta_poly margin provides additional numerical safety.
     float px = pt.hi_x + pt.lo_x;
     float py = pt.hi_y + pt.lo_y;
     if (px < poly.min_x - poly.eta_poly || px > poly.max_x + poly.eta_poly ||
@@ -501,7 +519,11 @@ kernel void point_in_polygon_refine(
         return;
     }
 
-    // Section 2.2 step 4: Relative probe displacement Delta_tilde
+#if BOUND_MODE == 1
+    float delta_x = pt.hi_x - poly.origin_hi_x;
+    float delta_y = pt.hi_y - poly.origin_hi_y;
+#else
+    // Section 2.2 step 4: Relative probe displacement Delta_tilde (double-single)
     float delta_hi_x = pt.hi_x - poly.origin_hi_x;
     float delta_lo_x = pt.lo_x - poly.origin_lo_x;
     float delta_x = delta_hi_x + delta_lo_x;
@@ -509,6 +531,7 @@ kernel void point_in_polygon_refine(
     float delta_hi_y = pt.hi_y - poly.origin_hi_y;
     float delta_lo_y = pt.lo_y - poly.origin_lo_y;
     float delta_y = delta_hi_y + delta_lo_y;
+#endif
 
     // Section 2.3 & 2.4: Conservative eta_k calculation with S_eta = 2.0
     float delta_norm_inf = metal::max(metal::abs(delta_x), metal::abs(delta_y));

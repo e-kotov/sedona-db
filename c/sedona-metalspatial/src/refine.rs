@@ -43,10 +43,18 @@ pub struct MetalSpatialRefiner {
 
 #[cfg(target_os = "macos")]
 impl MetalSpatialRefiner {
-    /// Creates a new MetalSpatialRefiner instance on the default Metal device.
+    /// Creates a new MetalSpatialRefiner instance on the default Metal device using certified v2 bound.
     pub fn try_new() -> Result<Self, MetalSpatialError> {
+        Self::try_new_with_mode(0)
+    }
+
+    /// Internal/test constructor specifying bound mode:
+    /// 0: certified v2 (default)
+    /// 1: flawed legacy v1 (for adversarial teeth testing)
+    #[doc(hidden)]
+    pub fn try_new_with_mode(bound_mode: i32) -> Result<Self, MetalSpatialError> {
         let mut raw = std::ptr::null_mut();
-        let rc = unsafe { ffi::SedonaMetalRefinerCreate(&mut raw) };
+        let rc = unsafe { ffi::SedonaMetalRefinerCreateWithMode(&mut raw, bound_mode) };
         if rc != 0 || raw.is_null() {
             let msg = unsafe {
                 let ptr = ffi::SedonaMetalRefinerGetLastError(raw);
@@ -209,6 +217,8 @@ impl MetalSpatialRefiner {
 
         // Pre-filter candidate pairs:
         // Empty, NaN, MultiPoint, or non-Point geometries route directly to uncertain.
+        let mut decisions = vec![STATE_UNCERTAIN; n];
+        let mut candidate_map = Vec::with_capacity(n);
         let mut gpu_build_indices = Vec::with_capacity(n);
         let mut gpu_probe_indices = Vec::with_capacity(n);
 
@@ -217,50 +227,53 @@ impl MetalSpatialRefiner {
             let p_idx = candidate_probe_indices[i];
 
             if (b_idx as usize) >= self.num_build_polygons || (p_idx as usize) >= probe_points.len() {
-                out_uncertain_build.push(b_idx);
-                out_uncertain_probe.push(p_idx);
+                // Out of range: remains STATE_UNCERTAIN
                 continue;
             }
 
             let pt = &probe_points[p_idx as usize];
             if pt.is_valid == 0 {
-                out_uncertain_build.push(b_idx);
-                out_uncertain_probe.push(p_idx);
+                // Invalid point: remains STATE_UNCERTAIN
                 continue;
             }
 
+            candidate_map.push(i);
             gpu_build_indices.push(b_idx);
             gpu_probe_indices.push(p_idx);
         }
 
-        if gpu_build_indices.is_empty() {
-            return Ok(());
+        if !gpu_build_indices.is_empty() {
+            let gpu_count = gpu_build_indices.len() as u32;
+            let mut states = vec![0u8; gpu_count as usize];
+
+            let rc = unsafe {
+                ffi::SedonaMetalRefinerRefine(
+                    self.raw,
+                    probe_points.as_ptr() as *const c_void,
+                    probe_points.len() as u32,
+                    gpu_build_indices.as_ptr(),
+                    gpu_probe_indices.as_ptr(),
+                    gpu_count,
+                    states.as_mut_ptr(),
+                )
+            };
+
+            if rc != 0 {
+                let msg = self.last_error();
+                return Err(MetalSpatialError::ProbeFailed { code: rc, msg });
+            }
+
+            for (k, &state) in states.iter().enumerate() {
+                let orig_i = candidate_map[k];
+                decisions[orig_i] = state as u32;
+            }
         }
 
-        let gpu_count = gpu_build_indices.len() as u32;
-        let mut states = vec![0u8; gpu_count as usize];
-
-        let rc = unsafe {
-            ffi::SedonaMetalRefinerRefine(
-                self.raw,
-                probe_points.as_ptr() as *const c_void,
-                probe_points.len() as u32,
-                gpu_build_indices.as_ptr(),
-                gpu_probe_indices.as_ptr(),
-                gpu_count,
-                states.as_mut_ptr(),
-            )
-        };
-
-        if rc != 0 {
-            let msg = self.last_error();
-            return Err(MetalSpatialError::ProbeFailed { code: rc, msg });
-        }
-
-        for (k, &state) in states.iter().enumerate() {
-            let b_idx = gpu_build_indices[k];
-            let p_idx = gpu_probe_indices[k];
-            match state as u32 {
+        // Emit verified and uncertain preserving original candidate order
+        for i in 0..n {
+            let b_idx = candidate_build_indices[i];
+            let p_idx = candidate_probe_indices[i];
+            match decisions[i] {
                 STATE_INSIDE => {
                     out_verified_build.push(b_idx);
                     out_verified_probe.push(p_idx);

@@ -43,6 +43,7 @@ pub mod ffi {
 
         // Refiner FFI
         pub fn SedonaMetalRefinerCreate(out_refiner: *mut *mut c_void) -> i32;
+        pub fn SedonaMetalRefinerCreateWithMode(out_refiner: *mut *mut c_void, bound_mode: i32) -> i32;
         pub fn SedonaMetalRefinerPushPolygons(
             refiner: *mut c_void,
             polys: *const c_void, poly_count: u32,

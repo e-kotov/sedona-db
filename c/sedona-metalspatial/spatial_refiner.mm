@@ -21,7 +21,7 @@
 #include <stdexcept>
 #include <algorithm>
 
-MetalSpatialRefiner::MetalSpatialRefiner(id device)
+MetalSpatialRefiner::MetalSpatialRefiner(id device, int bound_mode)
     : device_(device),
       command_queue_(nil),
       pipeline_state_(nil),
@@ -52,6 +52,7 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device)
         if (@available(macOS 15.0, *)) {
             options.mathMode = MTLMathModeSafe;
         }
+        options.preprocessorMacros = @{ @"BOUND_MODE": @(bound_mode) };
 
         NSError* error = nil;
         NSString* src = [NSString stringWithUTF8String:REFINE_METAL_SOURCE];

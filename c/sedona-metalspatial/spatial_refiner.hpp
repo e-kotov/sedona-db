@@ -30,7 +30,7 @@ typedef void* id;
 
 class MetalSpatialRefiner {
 public:
-    MetalSpatialRefiner(id device = nullptr);
+    MetalSpatialRefiner(id device = nullptr, int bound_mode = 0);
     ~MetalSpatialRefiner();
 
     void clear();

@@ -161,9 +161,13 @@ const char* SedonaMetalIndexGetLastError(void* index) {
 static thread_local std::string g_last_refiner_error;
 
 int SedonaMetalRefinerCreate(void** out_refiner) {
+    return SedonaMetalRefinerCreateWithMode(out_refiner, 0);
+}
+
+int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode) {
     if (!out_refiner) return -1;
     try {
-        auto* refiner = new MetalSpatialRefiner();
+        auto* refiner = new MetalSpatialRefiner(nil, bound_mode);
         *out_refiner = static_cast<void*>(refiner);
         return 0;
     } catch (const std::exception& e) {
