@@ -179,7 +179,7 @@ impl SpatialIndex for GPUSpatialIndex {
             let mut uncertain_pairs: Vec<(u32, u32)> = outcome
                 .uncertain_probe
                 .into_iter()
-                .zip(outcome.uncertain_build.into_iter())
+                .zip(outcome.uncertain_build)
                 .collect();
             uncertain_pairs.sort_unstable();
 
