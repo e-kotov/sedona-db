@@ -16,11 +16,15 @@
 // under the License.
 
 use crate::MetalSpatialError;
+use arrow_array::ArrayRef;
+
+#[cfg(target_os = "macos")]
 use crate::ffi;
+#[cfg(target_os = "macos")]
 use crate::flattener::{
     STATE_INSIDE, STATE_OUTSIDE, STATE_UNCERTAIN, flatten_build_polygons, flatten_probe_points,
 };
-use arrow_array::ArrayRef;
+#[cfg(target_os = "macos")]
 use std::ffi::{CStr, c_void};
 
 /// Container side gating for spatial relation containment semantics (R1).
