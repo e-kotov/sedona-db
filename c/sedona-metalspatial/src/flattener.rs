@@ -506,19 +506,35 @@ mod tests {
             for &(x, y) in *ring {
                 let mut f64_buf = [0u8; 8];
                 // X
-                if is_be { BigEndian::write_f64(&mut f64_buf, x); } else { LittleEndian::write_f64(&mut f64_buf, x); }
+                if is_be {
+                    BigEndian::write_f64(&mut f64_buf, x);
+                } else {
+                    LittleEndian::write_f64(&mut f64_buf, x);
+                }
                 buf.extend_from_slice(&f64_buf);
                 // Y
-                if is_be { BigEndian::write_f64(&mut f64_buf, y); } else { LittleEndian::write_f64(&mut f64_buf, y); }
+                if is_be {
+                    BigEndian::write_f64(&mut f64_buf, y);
+                } else {
+                    LittleEndian::write_f64(&mut f64_buf, y);
+                }
                 buf.extend_from_slice(&f64_buf);
                 // Z if present
                 if with_z {
-                    if is_be { BigEndian::write_f64(&mut f64_buf, 42.0); } else { LittleEndian::write_f64(&mut f64_buf, 42.0); }
+                    if is_be {
+                        BigEndian::write_f64(&mut f64_buf, 42.0);
+                    } else {
+                        LittleEndian::write_f64(&mut f64_buf, 42.0);
+                    }
                     buf.extend_from_slice(&f64_buf);
                 }
                 // M if present
                 if with_m {
-                    if is_be { BigEndian::write_f64(&mut f64_buf, 100.0); } else { LittleEndian::write_f64(&mut f64_buf, 100.0); }
+                    if is_be {
+                        BigEndian::write_f64(&mut f64_buf, 100.0);
+                    } else {
+                        LittleEndian::write_f64(&mut f64_buf, 100.0);
+                    }
                     buf.extend_from_slice(&f64_buf);
                 }
             }
@@ -562,7 +578,8 @@ mod tests {
 
         // Test 1: EWKB PolygonZ with SRID (little-endian)
         let ewkb_z_srid = make_ewkb_polygon(&rings, true, true, false, false);
-        let parsed = parse_wkb_polygon(&ewkb_z_srid).expect("EWKB PolygonZ with SRID failed to parse");
+        let parsed =
+            parse_wkb_polygon(&ewkb_z_srid).expect("EWKB PolygonZ with SRID failed to parse");
         assert_eq!(parsed.parts.len(), 1);
         assert_eq!(parsed.parts[0].rings[0].vertices.len(), 4);
         assert_eq!(parsed.parts[0].rings[0].vertices[1], (10.0, 0.0));
@@ -574,12 +591,14 @@ mod tests {
 
         // Test 3: EWKB PolygonZM with SRID (little-endian)
         let ewkb_zm_srid = make_ewkb_polygon(&rings, true, true, true, false);
-        let parsed_zm = parse_wkb_polygon(&ewkb_zm_srid).expect("EWKB PolygonZM with SRID failed to parse");
+        let parsed_zm =
+            parse_wkb_polygon(&ewkb_zm_srid).expect("EWKB PolygonZM with SRID failed to parse");
         assert_eq!(parsed_zm.parts[0].rings[0].vertices[3], (0.0, 10.0));
 
         // Test 4: EWKB PolygonZ Big-Endian
         let ewkb_be = make_ewkb_polygon(&rings, false, true, false, true);
-        let parsed_be = parse_wkb_polygon(&ewkb_be).expect("EWKB PolygonZ Big-Endian failed to parse");
+        let parsed_be =
+            parse_wkb_polygon(&ewkb_be).expect("EWKB PolygonZ Big-Endian failed to parse");
         assert_eq!(parsed_be.parts[0].rings[0].vertices[1], (10.0, 0.0));
 
         // Test 5: ISO PolygonZ (code 1003)
@@ -596,7 +615,10 @@ mod tests {
             let reconstructed = (hi as f64) + (lo as f64);
             let err = (c - reconstructed).abs();
             let bound = 2.0f64.powi(-48) * c.abs();
-            assert!(err <= bound + 1e-16, "Error {err} exceeded bound {bound} for {c}");
+            assert!(
+                err <= bound + 1e-16,
+                "Error {err} exceeded bound {bound} for {c}"
+            );
         }
     }
 
@@ -611,7 +633,10 @@ mod tests {
         let two_neg_48 = 3.552713678800501e-15f64;
         let exact_eta = 2.0 * u * r_poly + two_neg_48 * 600000.0f64;
 
-        assert!((eta as f64) >= exact_eta, "eta {eta} must be >= exact {exact_eta}");
+        assert!(
+            (eta as f64) >= exact_eta,
+            "eta {eta} must be >= exact {exact_eta}"
+        );
         assert!(eta > 0.0);
     }
 
@@ -626,12 +651,7 @@ mod tests {
         ]]);
         let corrupt = vec![1u8, 3, 0, 0, 0]; // truncated
         let empty = vec![1u8, 3, 0, 0, 0, 0, 0, 0, 0]; // 0 rings
-        let nan_poly = make_poly_wkb(&[&[
-            (f64::NAN, 0.0),
-            (10.0, 0.0),
-            (10.0, 10.0),
-            (0.0, 0.0),
-        ]]);
+        let nan_poly = make_poly_wkb(&[&[(f64::NAN, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)]]);
 
         let array: ArrayRef = Arc::new(BinaryArray::from(vec![
             Some(p1.as_slice()),

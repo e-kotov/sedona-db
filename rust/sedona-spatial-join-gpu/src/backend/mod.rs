@@ -17,9 +17,6 @@
 
 //! Platform backend abstraction for GPU spatial join (CUDA and Apple Metal).
 
-#[cfg(all(feature = "gpu", feature = "metal"))]
-compile_error!("Features 'gpu' (CUDA) and 'metal' (Apple Silicon) are mutually exclusive and cannot be enabled simultaneously.");
-
 /// Outcome of geometric refinement on the GPU.
 #[derive(Debug, Default, Clone)]
 pub struct RefineOutcome {
@@ -31,17 +28,17 @@ pub struct RefineOutcome {
     pub uncertain_probe: Vec<u32>,
 }
 
-#[cfg(feature = "gpu")]
-mod cuda;
-#[cfg(feature = "gpu")]
-pub use cuda::{PlatformSpatialIndex, PlatformSpatialRefiner};
-
 #[cfg(all(target_os = "macos", feature = "metal"))]
 mod metal;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal::{PlatformSpatialIndex, PlatformSpatialRefiner};
 
-#[cfg(not(any(feature = "gpu", all(target_os = "macos", feature = "metal"))))]
+#[cfg(all(feature = "gpu", not(all(target_os = "macos", feature = "metal"))))]
+mod cuda;
+#[cfg(all(feature = "gpu", not(all(target_os = "macos", feature = "metal"))))]
+pub use cuda::{PlatformSpatialIndex, PlatformSpatialRefiner};
+
+#[cfg(not(any(all(target_os = "macos", feature = "metal"), feature = "gpu")))]
 mod stub;
-#[cfg(not(any(feature = "gpu", all(target_os = "macos", feature = "metal"))))]
+#[cfg(not(any(all(target_os = "macos", feature = "metal"), feature = "gpu")))]
 pub use stub::{PlatformSpatialIndex, PlatformSpatialRefiner};

@@ -40,22 +40,31 @@ pub mod ffi {
         pub fn SedonaMetalIndexFree(index: *mut c_void);
         pub fn SedonaMetalIndexClear(index: *mut c_void) -> i32;
         pub fn SedonaMetalIndexGetLastError(index: *mut c_void) -> *const std::ffi::c_char;
+        pub fn SedonaMetalIndexGetMemUsage(index: *mut c_void) -> u64;
 
         // Refiner FFI
         pub fn SedonaMetalRefinerCreate(out_refiner: *mut *mut c_void) -> i32;
         #[cfg(feature = "test-internals")]
-        pub fn SedonaMetalRefinerCreateWithMode(out_refiner: *mut *mut c_void, bound_mode: i32) -> i32;
+        pub fn SedonaMetalRefinerCreateWithMode(
+            out_refiner: *mut *mut c_void,
+            bound_mode: i32,
+        ) -> i32;
         pub fn SedonaMetalRefinerPushPolygons(
             refiner: *mut c_void,
-            polys: *const c_void, poly_count: u32,
-            parts: *const c_void, part_count: u32,
-            rings: *const c_void, ring_count: u32,
-            vertices: *const c_void, vertex_count: u32,
+            polys: *const c_void,
+            poly_count: u32,
+            parts: *const c_void,
+            part_count: u32,
+            rings: *const c_void,
+            ring_count: u32,
+            vertices: *const c_void,
+            vertex_count: u32,
         ) -> i32;
         pub fn SedonaMetalRefinerFinish(refiner: *mut c_void) -> i32;
         pub fn SedonaMetalRefinerRefine(
             refiner: *mut c_void,
-            points: *const c_void, point_count: u32,
+            points: *const c_void,
+            point_count: u32,
             candidate_build_indices: *const u32,
             candidate_probe_indices: *const u32,
             candidate_count: u32,
@@ -88,7 +97,6 @@ pub enum MetalSpatialError {
     #[error("Null pointer or invalid state: {0}")]
     InvalidState(String),
 }
-
 
 pub struct MetalSpatialIndex {
     #[cfg(target_os = "macos")]
@@ -215,7 +223,9 @@ impl MetalSpatialIndex {
         let (build_vec, probe_vec) = if out_len > 0 {
             if out_build.is_null() || out_probe.is_null() {
                 unsafe { ffi::SedonaMetalIndexFreeResults(out_build, out_probe) };
-                return Err(MetalSpatialError::InvalidState("Probe returned null buffers with non-zero count".to_string()));
+                return Err(MetalSpatialError::InvalidState(
+                    "Probe returned null buffers with non-zero count".to_string(),
+                ));
             }
             let b_slice = unsafe { std::slice::from_raw_parts(out_build, out_len as usize) };
             let p_slice = unsafe { std::slice::from_raw_parts(out_probe, out_len as usize) };
@@ -229,6 +239,14 @@ impl MetalSpatialIndex {
         };
 
         Ok((build_vec, probe_vec))
+    }
+
+    /// Returns the number of bytes allocated for spatial index buffers on the GPU.
+    pub fn get_memory_usage(&self) -> usize {
+        if self.raw.is_null() {
+            return 0;
+        }
+        unsafe { ffi::SedonaMetalIndexGetMemUsage(self.raw) as usize }
     }
 }
 
@@ -268,6 +286,10 @@ impl MetalSpatialIndex {
 
     pub fn probe(&self, _rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>), MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn get_memory_usage(&self) -> usize {
+        0
     }
 }
 

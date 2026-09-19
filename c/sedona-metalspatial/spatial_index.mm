@@ -68,6 +68,7 @@ struct MetalSpatialIndex::Impl {
 
     // Build data
     std::vector<BoundingBox> build_boxes;
+    uint32_t build_count{0};
     id<MTLBuffer> buf_build_boxes = nil;
 
     // Hardware RT Acceleration Structure
@@ -490,6 +491,7 @@ bool MetalSpatialIndex::finish_building() {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     uint32_t n = static_cast<uint32_t>(impl_->build_boxes.size());
+    impl_->build_count = n;
     impl_->buf_build_boxes = [impl_->device newBufferWithBytes:impl_->build_boxes.data()
                                                         length:sizeof(BoundingBox) * n
                                                        options:MTLResourceStorageModeShared];
@@ -510,6 +512,10 @@ bool MetalSpatialIndex::finish_building() {
         }
     }
 
+    // Free host bounding boxes vector after uploading to Metal shared buffers
+    impl_->build_boxes.clear();
+    impl_->build_boxes.shrink_to_fit();
+
     auto t1 = std::chrono::high_resolution_clock::now();
     impl_->last_build_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     impl_->is_built.store(true);
@@ -525,7 +531,7 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
         impl_->set_last_error("Null rects pointer with non-zero count");
         return false;
     }
-    if (count == 0 || impl_->build_boxes.empty()) return true;
+    if (count == 0 || impl_->build_count == 0) return true;
     if (!is_valid()) {
         impl_->set_last_error("Index is invalid (missing device, queue or pipeline state)");
         return false;
@@ -738,11 +744,21 @@ double MetalSpatialIndex::get_last_probe_time_ms() const {
 }
 
 uint32_t MetalSpatialIndex::get_build_count() const {
-    return static_cast<uint32_t>(impl_->build_boxes.size());
+    return impl_->build_count;
+}
+
+uint64_t MetalSpatialIndex::get_memory_usage() const {
+    uint64_t total = 0;
+    if (impl_->buf_build_boxes) total += [impl_->buf_build_boxes length];
+    if (impl_->buf_grid_offsets) total += [impl_->buf_grid_offsets length];
+    if (impl_->buf_grid_entries) total += [impl_->buf_grid_entries length];
+    if (impl_->buf_rt_bboxes) total += [impl_->buf_rt_bboxes length];
+    return total;
 }
 
 void MetalSpatialIndex::clear() {
     impl_->build_boxes.clear();
+    impl_->build_count = 0;
     impl_->buf_build_boxes = nil;
     impl_->rt_accel = nil;
     impl_->buf_rt_bboxes = nil;

@@ -42,15 +42,25 @@ impl PlatformSpatialIndex {
     }
 
     pub fn push_build(&mut self, _rects: &[[f32; 4]]) -> Result<()> {
-        Err(DataFusionError::NotImplemented("GPU spatial index stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial index stub".to_string(),
+        ))
     }
 
     pub fn finish_building(&mut self) -> Result<()> {
-        Err(DataFusionError::NotImplemented("GPU spatial index stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial index stub".to_string(),
+        ))
     }
 
     pub fn probe(&self, _rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>)> {
-        Err(DataFusionError::NotImplemented("GPU spatial index stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial index stub".to_string(),
+        ))
+    }
+
+    pub fn get_index_mem_usage(&self) -> usize {
+        0
     }
 }
 
@@ -68,15 +78,21 @@ impl PlatformSpatialRefiner {
     }
 
     pub fn init_build_schema(&mut self, _data_type: &DataType) -> Result<()> {
-        Err(DataFusionError::NotImplemented("GPU spatial refiner stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial refiner stub".to_string(),
+        ))
     }
 
     pub fn push_build(&mut self, _array: &ArrayRef) -> Result<()> {
-        Err(DataFusionError::NotImplemented("GPU spatial refiner stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial refiner stub".to_string(),
+        ))
     }
 
     pub fn finish_building(&mut self) -> Result<()> {
-        Err(DataFusionError::NotImplemented("GPU spatial refiner stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial refiner stub".to_string(),
+        ))
     }
 
     pub fn refine(
@@ -86,10 +102,14 @@ impl PlatformSpatialRefiner {
         _candidate_build: &[u32],
         _candidate_probe: &[u32],
     ) -> Result<RefineOutcome> {
-        Err(DataFusionError::NotImplemented("GPU spatial refiner stub".to_string()))
+        Err(DataFusionError::NotImplemented(
+            "GPU spatial refiner stub".to_string(),
+        ))
     }
 
-    pub fn supports_predicate(_relation: &sedona_spatial_join::spatial_predicate::SpatialRelationType) -> bool {
+    pub fn supports_predicate(
+        _relation: &sedona_spatial_join::spatial_predicate::SpatialRelationType,
+    ) -> bool {
         false
     }
 

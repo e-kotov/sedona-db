@@ -15,13 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::MetalSpatialError;
 use crate::ffi;
 use crate::flattener::{
-    flatten_build_polygons, flatten_probe_points, STATE_INSIDE, STATE_OUTSIDE, STATE_UNCERTAIN,
+    STATE_INSIDE, STATE_OUTSIDE, STATE_UNCERTAIN, flatten_build_polygons, flatten_probe_points,
 };
-use crate::MetalSpatialError;
 use arrow_array::ArrayRef;
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 
 /// Container side gating for spatial relation containment semantics (R1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +160,9 @@ impl MetalSpatialRefiner {
     /// Clears accumulated build polygons and resets state.
     pub fn clear(&mut self) -> Result<(), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState("Refiner handle is null".to_string()));
+            return Err(MetalSpatialError::InvalidState(
+                "Refiner handle is null".to_string(),
+            ));
         }
         let rc = unsafe { ffi::SedonaMetalRefinerClear(self.raw) };
         if rc != 0 {
@@ -174,7 +176,9 @@ impl MetalSpatialRefiner {
     /// Parses Arrow array of build geometries, flattens to GPU records, and discards WKB.
     pub fn push_build(&mut self, array: &ArrayRef) -> Result<(), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState("Refiner handle is null".to_string()));
+            return Err(MetalSpatialError::InvalidState(
+                "Refiner handle is null".to_string(),
+            ));
         }
         if array.is_empty() {
             return Ok(());
@@ -208,7 +212,9 @@ impl MetalSpatialRefiner {
     /// Finalizes the build stage, transferring polygon topology to GPU shared memory.
     pub fn finish_building(&mut self) -> Result<(), MetalSpatialError> {
         if self.raw.is_null() {
-            return Err(MetalSpatialError::InvalidState("Refiner handle is null".to_string()));
+            return Err(MetalSpatialError::InvalidState(
+                "Refiner handle is null".to_string(),
+            ));
         }
         let rc = unsafe { ffi::SedonaMetalRefinerFinish(self.raw) };
         if rc != 0 {
@@ -268,7 +274,8 @@ impl MetalSpatialRefiner {
             let b_idx = candidate_build_indices[i];
             let p_idx = candidate_probe_indices[i];
 
-            if (b_idx as usize) >= self.num_build_polygons || (p_idx as usize) >= probe_points.len() {
+            if (b_idx as usize) >= self.num_build_polygons || (p_idx as usize) >= probe_points.len()
+            {
                 // Out of range: remains STATE_UNCERTAIN
                 continue;
             }
@@ -347,6 +354,56 @@ impl Drop for MetalSpatialRefiner {
             }
             self.raw = std::ptr::null_mut();
         }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl MetalSpatialRefiner {
+    pub fn try_new() -> Result<Self, MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn device_name(&self) -> &str {
+        "None"
+    }
+
+    pub fn last_error(&self) -> String {
+        "Metal is not supported on non-macOS platforms".to_string()
+    }
+
+    pub fn get_memory_usage(&self) -> usize {
+        0
+    }
+
+    pub fn supports_predicate(_predicate_name: &str) -> bool {
+        false
+    }
+
+    pub fn clear(&mut self) -> Result<(), MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn push_build(&mut self, _array: &ArrayRef) -> Result<(), MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn finish_building(&mut self) -> Result<(), MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn refine(
+        &self,
+        _probe: &ArrayRef,
+        _container: ContainerSide,
+        _candidate_build_indices: &[u32],
+        _candidate_probe_indices: &[u32],
+        _out_verified_build: &mut Vec<u32>,
+        _out_verified_probe: &mut Vec<u32>,
+        _out_uncertain_build: &mut Vec<u32>,
+        _out_uncertain_probe: &mut Vec<u32>,
+    ) -> Result<(), MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
     }
 }
 

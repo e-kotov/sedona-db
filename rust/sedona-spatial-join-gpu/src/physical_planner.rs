@@ -77,7 +77,9 @@ impl SpatialJoinPhysicalPlanner for GpuSpatialJoinPhysicalPlanner {
 
         if !crate::backend::PlatformSpatialIndex::is_available() {
             if gpu_options.fallback_to_cpu {
-                log::warn!("Falling back to CPU spatial join as GPU spatial acceleration is not available");
+                log::warn!(
+                    "Falling back to CPU spatial join as GPU spatial acceleration is not available"
+                );
                 return Ok(None);
             } else {
                 return Err(DataFusionError::Plan(

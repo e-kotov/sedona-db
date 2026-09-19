@@ -171,6 +171,16 @@ const char* SedonaMetalIndexGetLastError(void* index) {
     }
 }
 
+uint64_t SedonaMetalIndexGetMemUsage(void* index) {
+    if (!index) return 0;
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        return idx->get_memory_usage();
+    } catch (...) {
+        return 0;
+    }
+}
+
 // ============================================================================
 // Metal Spatial Refiner C-ABI Implementations
 // ============================================================================

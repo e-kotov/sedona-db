@@ -66,7 +66,7 @@ pub trait SpatialJoinProvider: std::fmt::Debug + Send + Sync {
 
     /// Return the name of the join provider (e.g. "Cpu", "Gpu")
     fn name(&self) -> &str {
-        "Cpu"
+        "Unknown"
     }
 }
 
@@ -75,6 +75,10 @@ pub trait SpatialJoinProvider: std::fmt::Debug + Send + Sync {
 pub struct DefaultSpatialJoinProvider;
 
 impl SpatialJoinProvider for DefaultSpatialJoinProvider {
+    fn name(&self) -> &str {
+        "Cpu"
+    }
+
     fn try_new_spatial_index_builder(
         &self,
         schema: SchemaRef,

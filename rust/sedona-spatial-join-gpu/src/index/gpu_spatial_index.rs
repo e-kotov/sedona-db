@@ -27,10 +27,10 @@ use sedona_common::{ExecutionMode, SpatialJoinOptions};
 use sedona_expr::statistics::GeoStatistics;
 use sedona_spatial_join::evaluated_batch::EvaluatedBatch;
 use sedona_spatial_join::index::spatial_index::SpatialIndex;
+use sedona_spatial_join::index::spatial_index_builder::SpatialJoinBuildMetrics;
 use sedona_spatial_join::index::{IndexQueryResult, QueryResultMetrics};
 use sedona_spatial_join::refine::{
-    DefaultIndexQueryResultRefinerFactory, IndexQueryResultRefiner,
-    IndexQueryResultRefinerFactory,
+    DefaultIndexQueryResultRefinerFactory, IndexQueryResultRefiner, IndexQueryResultRefinerFactory,
 };
 use sedona_spatial_join::SpatialPredicate;
 use std::ops::Range;
@@ -59,6 +59,7 @@ pub struct GPUSpatialIndex {
     /// The last finished probe thread will produce the extra output batches for unmatched
     /// build side when running left-outer joins. See also [`report_probe_completed`].
     pub(crate) probe_threads_counter: AtomicUsize,
+    pub(crate) build_metrics: SpatialJoinBuildMetrics,
 }
 
 impl GPUSpatialIndex {
@@ -90,6 +91,7 @@ impl GPUSpatialIndex {
             data_id_to_batch_pos: vec![],
             visited_build_side,
             probe_threads_counter,
+            build_metrics: SpatialJoinBuildMetrics::default(),
         })
     }
 }
@@ -146,10 +148,9 @@ impl SpatialIndex for GPUSpatialIndex {
             })
             .collect();
 
-        let (gpu_build_indices, gpu_probe_indices) =
-            index.probe(rects.as_ref()).map_err(|e| {
-                DataFusionError::Execution(format!("GPU spatial query failed: {:?}", e))
-            })?;
+        let (gpu_build_indices, gpu_probe_indices) = index.probe(rects.as_ref()).map_err(|e| {
+            DataFusionError::Execution(format!("GPU spatial query failed: {:?}", e))
+        })?;
 
         assert_eq!(gpu_build_indices.len(), gpu_probe_indices.len());
         let candidate_count = gpu_build_indices.len();
@@ -222,16 +223,22 @@ impl SpatialIndex for GPUSpatialIndex {
         }
 
         // 2. Verified pairs from GPU (sorted by probe_idx, then build pos)
-        let mut verified_pairs: Vec<(u32, (i32, i32))> = Vec::with_capacity(outcome.verified_build.len());
-        for (&build_id, &probe_idx) in outcome.verified_build.iter().zip(outcome.verified_probe.iter()) {
+        let mut verified_pairs: Vec<(u32, (i32, i32))> =
+            Vec::with_capacity(outcome.verified_build.len());
+        for (&build_id, &probe_idx) in outcome
+            .verified_build
+            .iter()
+            .zip(outcome.verified_probe.iter())
+        {
             let pos = self.data_id_to_batch_pos[build_id as usize];
             verified_pairs.push((probe_idx, pos));
         }
         verified_pairs.sort_unstable();
 
         let gpu_verified_count = verified_pairs.len();
-        crate::record_gpu_verified(gpu_verified_count);
+        self.build_metrics.gpu_verified.add(gpu_verified_count);
         let cpu_resolved_count = cpu_resolved_pairs.len();
+        self.build_metrics.cpu_resolved.add(cpu_resolved_count);
         let total_count = gpu_verified_count + cpu_resolved_count;
 
         // P8: Observability logging
@@ -860,8 +867,7 @@ mod tests {
             &WKB_GEOMETRY,
         );
         let build_batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(build_geom_batch.clone())])
-                .unwrap();
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(build_geom_batch.clone())]).unwrap();
         let evaluated_build = EvaluatedBatch {
             batch: build_batch,
             geom_array: EvaluatedGeometryArray::try_new(build_geom_batch, &WKB_GEOMETRY).unwrap(),
@@ -884,7 +890,13 @@ mod tests {
         let mut full_positions = Vec::new();
         let mut full_probe_indices = Vec::new();
         let (full_metrics, _) = index
-            .query_batch(&probe_batch, 0..6, usize::MAX, &mut full_positions, &mut full_probe_indices)
+            .query_batch(
+                &probe_batch,
+                0..6,
+                usize::MAX,
+                &mut full_positions,
+                &mut full_probe_indices,
+            )
             .await
             .unwrap();
 
@@ -893,17 +905,39 @@ mod tests {
         let mut split_probe_indices = Vec::new();
 
         let (m1, _) = index
-            .query_batch(&probe_batch, 0..3, usize::MAX, &mut split_positions, &mut split_probe_indices)
+            .query_batch(
+                &probe_batch,
+                0..3,
+                usize::MAX,
+                &mut split_positions,
+                &mut split_probe_indices,
+            )
             .await
             .unwrap();
         let (m2, _) = index
-            .query_batch(&probe_batch, 3..6, usize::MAX, &mut split_positions, &mut split_probe_indices)
+            .query_batch(
+                &probe_batch,
+                3..6,
+                usize::MAX,
+                &mut split_positions,
+                &mut split_probe_indices,
+            )
             .await
             .unwrap();
 
         // Compare split results with full-range results (P1 verification)
-        assert_eq!(full_metrics.count, m1.count + m2.count, "Match count mismatch between full and split");
-        assert_eq!(full_probe_indices, split_probe_indices, "Probe indices mismatch for sliced range");
-        assert_eq!(full_positions, split_positions, "Build positions mismatch for sliced range");
+        assert_eq!(
+            full_metrics.count,
+            m1.count + m2.count,
+            "Match count mismatch between full and split"
+        );
+        assert_eq!(
+            full_probe_indices, split_probe_indices,
+            "Probe indices mismatch for sliced range"
+        );
+        assert_eq!(
+            full_positions, split_positions,
+            "Build positions mismatch for sliced range"
+        );
     }
 }

@@ -355,12 +355,23 @@ impl DisplayAs for SpatialJoinExec {
                 write!(
                     f,
                     "SpatialJoinExec: join_type={:?}{}{}{}{}",
-                    self.join_type, display_on, display_filter, display_projections, display_provider
+                    self.join_type,
+                    display_on,
+                    display_filter,
+                    display_projections,
+                    display_provider
                 )
             }
             DisplayFormatType::TreeRender => {
+                let mut parts = Vec::new();
                 if *self.join_type() != JoinType::Inner {
-                    writeln!(f, "join_type={:?}", self.join_type)
+                    parts.push(format!("join_type={:?}", self.join_type));
+                }
+                if self.join_provider.name() != "Cpu" {
+                    parts.push(format!("provider={}", self.join_provider.name()));
+                }
+                if !parts.is_empty() {
+                    writeln!(f, "{}", parts.join(", "))
                 } else {
                     Ok(())
                 }
@@ -370,6 +381,10 @@ impl DisplayAs for SpatialJoinExec {
 }
 
 impl ExecutionPlan for SpatialJoinExec {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn name(&self) -> &str {
         "SpatialJoinExec"
     }

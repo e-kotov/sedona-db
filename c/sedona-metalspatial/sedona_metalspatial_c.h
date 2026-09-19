@@ -33,6 +33,7 @@ void SedonaMetalIndexFreeResults(uint32_t* out_build, uint32_t* out_probe);
 void SedonaMetalIndexFree(void* index);
 int SedonaMetalIndexClear(void* index);
 const char* SedonaMetalIndexGetLastError(void* index);
+uint64_t SedonaMetalIndexGetMemUsage(void* index);
 
 // Metal Spatial Refiner C-ABI
 int SedonaMetalRefinerCreate(void** out_refiner);

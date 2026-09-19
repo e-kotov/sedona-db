@@ -89,6 +89,7 @@ private:
     std::vector<Point2D> host_vertices_;
 
     bool is_built_;
+    uint32_t num_polygons_;
     uint64_t allocated_bytes_;
     std::string device_name_;
     mutable std::mutex error_mutex_;

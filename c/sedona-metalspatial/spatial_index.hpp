@@ -72,6 +72,7 @@ public:
     double get_last_build_time_ms() const;
     double get_last_probe_time_ms() const;
     uint32_t get_build_count() const;
+    uint64_t get_memory_usage() const;
     const char* get_last_error() const;
     void set_last_error(const std::string& err);
     void clear();

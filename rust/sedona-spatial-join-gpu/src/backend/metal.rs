@@ -32,8 +32,9 @@ pub struct PlatformSpatialIndex {
 
 impl PlatformSpatialIndex {
     pub fn try_new(_options: &GpuOptions) -> Result<Self> {
-        let raw = MetalSpatialIndex::try_new()
-            .map_err(|e| DataFusionError::Execution(format!("Failed to initialize Metal spatial index: {e}")))?;
+        let raw = MetalSpatialIndex::try_new().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to initialize Metal spatial index: {e}"))
+        })?;
         Ok(Self { raw })
     }
 
@@ -46,21 +47,29 @@ impl PlatformSpatialIndex {
     }
 
     pub fn push_build(&mut self, rects: &[[f32; 4]]) -> Result<()> {
-        self.raw
-            .push_build(rects)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to push rectangles to Metal spatial index: {e}")))
+        self.raw.push_build(rects).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to push rectangles to Metal spatial index: {e}"
+            ))
+        })
     }
 
     pub fn finish_building(&mut self) -> Result<()> {
-        self.raw
-            .finish_building()
-            .map_err(|e| DataFusionError::Execution(format!("Failed to finish building Metal spatial index: {e}")))
+        self.raw.finish_building().map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to finish building Metal spatial index: {e}"
+            ))
+        })
     }
 
     pub fn probe(&self, rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>)> {
         self.raw
             .probe(rects)
             .map_err(|e| DataFusionError::Execution(format!("Metal spatial query failed: {e}")))
+    }
+
+    pub fn get_index_mem_usage(&self) -> usize {
+        self.raw.get_memory_usage()
     }
 }
 
@@ -70,8 +79,9 @@ pub struct PlatformSpatialRefiner {
 
 impl PlatformSpatialRefiner {
     pub fn try_new(_options: &GpuOptions) -> Result<Self> {
-        let raw = MetalSpatialRefiner::try_new()
-            .map_err(|e| DataFusionError::Execution(format!("Failed to initialize Metal spatial refiner: {e}")))?;
+        let raw = MetalSpatialRefiner::try_new().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to initialize Metal spatial refiner: {e}"))
+        })?;
         Ok(Self { raw })
     }
 
@@ -85,15 +95,17 @@ impl PlatformSpatialRefiner {
     }
 
     pub fn push_build(&mut self, array: &ArrayRef) -> Result<()> {
-        self.raw
-            .push_build(array)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to push build geometries to Metal refiner: {e}")))
+        self.raw.push_build(array).map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Failed to push build geometries to Metal refiner: {e}"
+            ))
+        })
     }
 
     pub fn finish_building(&mut self) -> Result<()> {
-        self.raw
-            .finish_building()
-            .map_err(|e| DataFusionError::Execution(format!("Failed to finalize Metal refiner build: {e}")))
+        self.raw.finish_building().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to finalize Metal refiner build: {e}"))
+        })
     }
 
     pub fn refine(
@@ -106,8 +118,12 @@ impl PlatformSpatialRefiner {
         match predicate {
             SpatialPredicate::Relation(rel_p) => {
                 let container = match &rel_p.relation_type {
-                    SpatialRelationType::Contains | SpatialRelationType::Covers => ContainerSide::Build,
-                    SpatialRelationType::Within | SpatialRelationType::CoveredBy => ContainerSide::Probe,
+                    SpatialRelationType::Contains | SpatialRelationType::Covers => {
+                        ContainerSide::Build
+                    }
+                    SpatialRelationType::Within | SpatialRelationType::CoveredBy => {
+                        ContainerSide::Probe
+                    }
                     SpatialRelationType::Intersects => ContainerSide::Either,
                     other => {
                         return Err(DataFusionError::Plan(format!(

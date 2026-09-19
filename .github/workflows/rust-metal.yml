@@ -70,28 +70,41 @@ jobs:
 
       - name: Run sedona-metalspatial Tests (Gates 1-7, Flattener, Refiner, and Index)
         run: |
-          cargo test -p sedona-metalspatial -- --nocapture
+          cargo test -p sedona-metalspatial -- --nocapture 2>&1 | tee sedona-metalspatial.log
 
       - name: Run C++ Scalable Spatial Index Tests (Hardware RT & Spatial Hash 50k x 50k)
         working-directory: c/sedona-metalspatial
         run: |
-          make test_index_scale
+          make test_index_scale 2>&1 | tee ../../test_index_scale.log
 
       - name: Run Phase 4 End-to-End Integration Tests (sedona-spatial-join-gpu)
         run: |
-          cargo test -p sedona-spatial-join-gpu --features metal -- --nocapture
+          cargo test -p sedona-spatial-join-gpu --features metal -- --nocapture 2>&1 | tee sedona-spatial-join-gpu.log
 
       - name: Generate Metal Execution and Test Coverage Summary
         if: always()
         run: |
-          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
-          ## Metal Spatial Join Test & Hardware Verification Summary
-
-          - **Runner OS**: macOS 15 (Apple Silicon Paravirtual device)
-          - **Hardware Ray Tracing (RT Cores)**: GitHub Actions virtualized macOS runners run on an \`Apple Paravirtual device\` where Metal 3 ray tracing acceleration structures are not virtualized by Apple's hypervisor. The engine detects this via \`device.supportsRaytracing\` and automatically falls back to the **Fast 2D Uniform Grid Compute Spatial Hash**.
-          - **Compute Fallback Verification**: Fully verified via 50,000 build boxes × 50,000 probe boxes with 100% exact parity against CPU ground truth. Hardware Ray Tracing BVH tests are verified on bare metal Apple Silicon devices.
-          - **Phase 1-4 Engine Verification**:
-            - Certified v2 error bounds & robust point-in-polygon refiner: Gates 1–7 passed.
-            - FFI & Arrow WKB topological flattener: passed.
-            - End-to-end DataFusion SQL differential join suite: passed against CPU oracle with \`fallback_to_cpu = false\`, \`provider=Gpu\`, and verified candidate checks.
-          EOF
+          echo "## Metal Spatial Join Test & Hardware Verification Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Test Execution Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          if [ -f sedona-metalspatial.log ]; then
+            echo "--- sedona-metalspatial ---" >> $GITHUB_STEP_SUMMARY
+            grep "test result:" sedona-metalspatial.log >> $GITHUB_STEP_SUMMARY || echo "No test results recorded" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f test_index_scale.log ]; then
+            echo "--- test_index_scale ---" >> $GITHUB_STEP_SUMMARY
+            grep -E "\[SKIPPED\]|Passed|FAILED|All tests passed" test_index_scale.log >> $GITHUB_STEP_SUMMARY || echo "No index scale results recorded" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f sedona-spatial-join-gpu.log ]; then
+            echo "--- sedona-spatial-join-gpu ---" >> $GITHUB_STEP_SUMMARY
+            grep "test result:" sedona-spatial-join-gpu.log >> $GITHUB_STEP_SUMMARY || echo "No test results recorded" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Known Coverage Gaps" >> $GITHUB_STEP_SUMMARY
+          echo "- **Hardware Ray Tracing (RT Cores)**: GitHub Actions virtualized macOS runners run on an \`Apple Paravirtual device\` where Metal 3 ray tracing acceleration structures are not exposed by the hypervisor (\`device.supportsRaytracing == NO\`). Hardware RT tests are skipped on CI runners and must be verified on bare metal Apple Silicon hardware." >> $GITHUB_STEP_SUMMARY
+          if grep -q "\[SKIPPED\]" test_index_scale.log 2>/dev/null; then
+            echo "  - Skipped tests detected in index scale suite:" >> $GITHUB_STEP_SUMMARY
+            grep "\[SKIPPED\]" test_index_scale.log | sed 's/^/    - /' >> $GITHUB_STEP_SUMMARY
+          fi

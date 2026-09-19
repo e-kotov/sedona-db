@@ -25,15 +25,21 @@ fn cpu_intersects(b: &[f32; 4], p: &[f32; 4]) -> bool {
 #[test]
 fn test_lifecycle_and_empty() {
     let mut index = MetalSpatialIndex::try_new().expect("Failed to create MetalSpatialIndex");
-    index.push_build(&[]).expect("Empty push_build should succeed");
-    index.finish_building().expect("finish_building should succeed");
+    index
+        .push_build(&[])
+        .expect("Empty push_build should succeed");
+    index
+        .finish_building()
+        .expect("finish_building should succeed");
 
     let (build_res, probe_res) = index.probe(&[]).expect("Empty probe should succeed");
     assert!(build_res.is_empty());
     assert!(probe_res.is_empty());
 
     let dummy_probes = vec![[0.0, 0.0, 1.0, 1.0]];
-    let (b_res2, p_res2) = index.probe(&dummy_probes).expect("Probe on empty index should succeed");
+    let (b_res2, p_res2) = index
+        .probe(&dummy_probes)
+        .expect("Probe on empty index should succeed");
     assert!(b_res2.is_empty());
     assert!(p_res2.is_empty());
 
@@ -52,18 +58,15 @@ fn test_lifecycle_and_empty() {
 fn test_basic_box_intersections() {
     let mut index = MetalSpatialIndex::try_new().expect("Failed to create MetalSpatialIndex");
 
-    let build_boxes = vec![
-        [0.0, 0.0, 10.0, 10.0],
-        [20.0, 20.0, 30.0, 30.0],
-    ];
+    let build_boxes = vec![[0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 30.0, 30.0]];
     index.push_build(&build_boxes).expect("push_build failed");
     index.finish_building().expect("finish_building failed");
 
     let probe_boxes = vec![
-        [5.0, 5.0, 6.0, 6.0],       // intersects box 0
-        [25.0, 25.0, 26.0, 26.0],   // intersects box 1
-        [50.0, 50.0, 60.0, 60.0],   // intersects neither
-        [5.0, 5.0, 25.0, 25.0],     // intersects box 0 and box 1
+        [5.0, 5.0, 6.0, 6.0],     // intersects box 0
+        [25.0, 25.0, 26.0, 26.0], // intersects box 1
+        [50.0, 50.0, 60.0, 60.0], // intersects neither
+        [5.0, 5.0, 25.0, 25.0],   // intersects box 0 and box 1
     ];
 
     let (b_res, p_res) = index.probe(&probe_boxes).expect("probe failed");
@@ -87,17 +90,14 @@ fn test_basic_box_intersections() {
 fn test_point_probes() {
     let mut index = MetalSpatialIndex::try_new().expect("Failed to create MetalSpatialIndex");
 
-    let build_boxes = vec![
-        [0.0, 0.0, 10.0, 10.0],
-        [100.0, 100.0, 200.0, 200.0],
-    ];
+    let build_boxes = vec![[0.0, 0.0, 10.0, 10.0], [100.0, 100.0, 200.0, 200.0]];
     index.push_build(&build_boxes).expect("push_build failed");
     index.finish_building().expect("finish_building failed");
 
     let probe_points = vec![
-        [5.0, 5.0, 5.0, 5.0],           // in box 0
-        [50.0, 50.0, 50.0, 50.0],       // neither
-        [150.0, 150.0, 150.0, 150.0],   // in box 1
+        [5.0, 5.0, 5.0, 5.0],         // in box 0
+        [50.0, 50.0, 50.0, 50.0],     // neither
+        [150.0, 150.0, 150.0, 150.0], // in box 1
     ];
 
     let (b_res, p_res) = index.probe(&probe_points).expect("probe failed");
@@ -133,8 +133,12 @@ fn test_chunked_build_and_ground_truth() {
         build_chunk2.push([x, y, x + 8.0, y + 8.0]);
     }
 
-    index.push_build(&build_chunk1).expect("push chunk 1 failed");
-    index.push_build(&build_chunk2).expect("push chunk 2 failed");
+    index
+        .push_build(&build_chunk1)
+        .expect("push chunk 1 failed");
+    index
+        .push_build(&build_chunk2)
+        .expect("push chunk 2 failed");
     index.finish_building().expect("finish_building failed");
 
     // Generate 80 probe boxes
@@ -167,7 +171,10 @@ fn test_chunked_build_and_ground_truth() {
     }
 
     assert_eq!(actual_pairs, expected_pairs);
-    assert!(!expected_pairs.is_empty(), "Should have found matching pairs");
+    assert!(
+        !expected_pairs.is_empty(),
+        "Should have found matching pairs"
+    );
 }
 
 #[test]
@@ -261,11 +268,11 @@ fn test_nan_inf_handling() {
     index.finish_building().expect("finish_building failed");
 
     let probe_boxes = vec![
-        [5.0, 5.0, 5.0, 5.0],         // 0: in box 0
-        [qnan, 5.0, qnan, 5.0],       // 1: NaN probe
-        [5.0, pinf, 5.0, pinf],       // 2: Inf probe
-        [25.0, 25.0, 25.0, 25.0],     // 3: in box 10
-        [15.0, 0.0, 5.0, 0.0],        // 4: inverted probe
+        [5.0, 5.0, 5.0, 5.0],     // 0: in box 0
+        [qnan, 5.0, qnan, 5.0],   // 1: NaN probe
+        [5.0, pinf, 5.0, pinf],   // 2: Inf probe
+        [25.0, 25.0, 25.0, 25.0], // 3: in box 10
+        [15.0, 0.0, 5.0, 0.0],    // 4: inverted probe
     ];
 
     let (b_res, p_res) = index.probe(&probe_boxes).expect("probe failed");
@@ -284,14 +291,18 @@ fn test_nan_inf_handling() {
 
     // All-NaN build test
     let mut empty_build_index = MetalSpatialIndex::try_new().expect("Failed to create index");
-    empty_build_index.push_build(&[[qnan, qnan, qnan, qnan], [pinf, pinf, pinf, pinf]]).unwrap();
+    empty_build_index
+        .push_build(&[[qnan, qnan, qnan, qnan], [pinf, pinf, pinf, pinf]])
+        .unwrap();
     empty_build_index.finish_building().unwrap();
     let (b_res2, p_res2) = empty_build_index.probe(&probe_boxes).unwrap();
     assert!(b_res2.is_empty());
     assert!(p_res2.is_empty());
 
     // All-NaN probe test
-    let (b_res3, p_res3) = index.probe(&[[qnan, qnan, qnan, qnan], [pinf, pinf, pinf, pinf]]).unwrap();
+    let (b_res3, p_res3) = index
+        .probe(&[[qnan, qnan, qnan, qnan], [pinf, pinf, pinf, pinf]])
+        .unwrap();
     assert!(b_res3.is_empty());
     assert!(p_res3.is_empty());
 }
@@ -322,16 +333,10 @@ fn test_hierarchical_adversarial() {
     index.finish_building().unwrap();
 
     // 5 probe boxes
-    let probe_boxes = vec![
-        [10.0f32, 10.0, 20.0, 20.0],
-        [50.0, 50.0, 60.0, 60.0],
-    ];
+    let probe_boxes = vec![[10.0f32, 10.0, 20.0, 20.0], [50.0, 50.0, 60.0, 60.0]];
 
     let (b_res, p_res) = index.probe(&probe_boxes).unwrap();
     // Every probe intersects all 10,000 boxes -> 20,000 matches total
     assert_eq!(b_res.len(), 20_000);
     assert_eq!(p_res.len(), 20_000);
 }
-
-
-

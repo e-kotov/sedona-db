@@ -153,13 +153,15 @@ fn make_multipoly_wkb(poly: &MultiPolyDef) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(1); // Little endian
         buf.write_u32::<LittleEndian>(3).unwrap(); // Polygon
-        buf.write_u32::<LittleEndian>(part.rings.len() as u32).unwrap();
+        buf.write_u32::<LittleEndian>(part.rings.len() as u32)
+            .unwrap();
         for ring in &part.rings {
             let mut closed_ring = ring.clone();
             if closed_ring.first() != closed_ring.last() {
                 closed_ring.push(closed_ring[0]);
             }
-            buf.write_u32::<LittleEndian>(closed_ring.len() as u32).unwrap();
+            buf.write_u32::<LittleEndian>(closed_ring.len() as u32)
+                .unwrap();
             for (x, y) in closed_ring {
                 buf.write_f64::<LittleEndian>(x).unwrap();
                 buf.write_f64::<LittleEndian>(y).unwrap();
@@ -171,17 +173,20 @@ fn make_multipoly_wkb(poly: &MultiPolyDef) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(1); // Little endian
         buf.write_u32::<LittleEndian>(6).unwrap(); // MultiPolygon
-        buf.write_u32::<LittleEndian>(poly.parts.len() as u32).unwrap();
+        buf.write_u32::<LittleEndian>(poly.parts.len() as u32)
+            .unwrap();
         for part in &poly.parts {
             buf.push(1); // Little endian
             buf.write_u32::<LittleEndian>(3).unwrap(); // Polygon
-            buf.write_u32::<LittleEndian>(part.rings.len() as u32).unwrap();
+            buf.write_u32::<LittleEndian>(part.rings.len() as u32)
+                .unwrap();
             for ring in &part.rings {
                 let mut closed_ring = ring.clone();
                 if closed_ring.first() != closed_ring.last() {
                     closed_ring.push(closed_ring[0]);
                 }
-                buf.write_u32::<LittleEndian>(closed_ring.len() as u32).unwrap();
+                buf.write_u32::<LittleEndian>(closed_ring.len() as u32)
+                    .unwrap();
                 for (x, y) in closed_ring {
                     buf.write_f64::<LittleEndian>(x).unwrap();
                     buf.write_f64::<LittleEndian>(y).unwrap();
@@ -258,7 +263,10 @@ impl SeededRng {
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.state
     }
 
@@ -283,7 +291,9 @@ fn generate_adversarial_suite(
     for &n_verts in &[8, 64, 512, 2000] {
         let star_ring = generate_random_star_ring(cx, cy, r_poly, n_verts, &mut rng);
         polys.push(MultiPolyDef {
-            parts: vec![PolyPart { rings: vec![star_ring] }],
+            parts: vec![PolyPart {
+                rings: vec![star_ring],
+            }],
         });
     }
 
@@ -301,7 +311,9 @@ fn generate_adversarial_suite(
         (cx - r_poly * 0.3, cy + r_poly * 0.3),
     ];
     polys.push(MultiPolyDef {
-        parts: vec![PolyPart { rings: vec![ext_box, hole_box] }],
+        parts: vec![PolyPart {
+            rings: vec![ext_box, hole_box],
+        }],
     });
 
     // 3. MultiPolygon with 2 disjoint parts
@@ -334,21 +346,23 @@ fn generate_adversarial_suite(
     // - Collinear triples and duplicate vertices
     let eta_k = 4.0 * 5.9604645e-8 * r_poly;
     let adv_ring = vec![
-        (cx - 1.0, cy - 0.25 * eta_k),              // Counterexample A: vertex V
-        (cx + 1000.0, cy + 3.0 * eta_k),           // Counterexample A: vertex W
-        (cx + r_poly * 0.8, cy + 1e-6 * r_poly),   // Near-horizontal grazing edge start
-        (cx + 1.2 * r_poly, cy),                   // Sharp spike apex on ray y = cy
-        (cx + r_poly * 0.8, cy - 1e-6 * r_poly),   // Near-horizontal grazing edge end
-        (cx + 5.0, cy - 3.0 * eta_k),              // Mode 1 test edge V1 (|y| > eta_k)
-        (cx - 5.0, cy + 3.0 * eta_k),              // Mode 1 test edge V2 (|y| > eta_k)
-        (cx - r_poly * 0.5, cy + r_poly * 0.5),    // 45° edge
-        (cx - r_poly * 0.5, cy + r_poly * 0.5),    // duplicate consecutive vertex
-        (cx - r_poly * 0.25, cy + r_poly * 0.5),   // collinear triple part 1
-        (cx, cy + r_poly * 0.5),                   // collinear triple part 2
-        (cx - r_poly * 0.5, cy),                   // vertical edge
+        (cx - 1.0, cy - 0.25 * eta_k),           // Counterexample A: vertex V
+        (cx + 1000.0, cy + 3.0 * eta_k),         // Counterexample A: vertex W
+        (cx + r_poly * 0.8, cy + 1e-6 * r_poly), // Near-horizontal grazing edge start
+        (cx + 1.2 * r_poly, cy),                 // Sharp spike apex on ray y = cy
+        (cx + r_poly * 0.8, cy - 1e-6 * r_poly), // Near-horizontal grazing edge end
+        (cx + 5.0, cy - 3.0 * eta_k),            // Mode 1 test edge V1 (|y| > eta_k)
+        (cx - 5.0, cy + 3.0 * eta_k),            // Mode 1 test edge V2 (|y| > eta_k)
+        (cx - r_poly * 0.5, cy + r_poly * 0.5),  // 45° edge
+        (cx - r_poly * 0.5, cy + r_poly * 0.5),  // duplicate consecutive vertex
+        (cx - r_poly * 0.25, cy + r_poly * 0.5), // collinear triple part 1
+        (cx, cy + r_poly * 0.5),                 // collinear triple part 2
+        (cx - r_poly * 0.5, cy),                 // vertical edge
     ];
     polys.push(MultiPolyDef {
-        parts: vec![PolyPart { rings: vec![adv_ring] }],
+        parts: vec![PolyPart {
+            rings: vec![adv_ring],
+        }],
     });
 
     // Collect all probe points across adversarial perturbation scales
@@ -372,7 +386,9 @@ fn generate_adversarial_suite(
     }
 
     // Perturbation scale factors required by T1:
-    let k_values: [f64; 11] = [0.0, -1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -16.0, 16.0, -256.0, 256.0];
+    let k_values: [f64; 11] = [
+        0.0, -1.0, 1.0, -2.0, 2.0, -4.0, 4.0, -16.0, 16.0, -256.0, 256.0,
+    ];
 
     for poly in &polys {
         for part in &poly.parts {
@@ -402,12 +418,12 @@ fn generate_adversarial_suite(
                         let m_coord = mx.abs().max(my.abs()).max(1.0);
 
                         let s_values = [
-                            2.22e-16 * m_coord,   // f64 ulp of coordinate
-                            1.19e-7 * m_coord,    // f32 ulp of coordinate
-                            1.19e-7 * r_poly,     // f32 ulp of R_poly
-                            eta_k * 0.25,         // eta_k / 4
-                            eta_k,                // eta_k
-                            4.0 * eta_k,          // 4 * eta_k
+                            2.22e-16 * m_coord, // f64 ulp of coordinate
+                            1.19e-7 * m_coord,  // f32 ulp of coordinate
+                            1.19e-7 * r_poly,   // f32 ulp of R_poly
+                            eta_k * 0.25,       // eta_k / 4
+                            eta_k,              // eta_k
+                            4.0 * eta_k,        // 4 * eta_k
                         ];
 
                         for &s in &s_values {
@@ -546,7 +562,8 @@ fn test_gate_1_full_two_sided_soundness() {
         .expect("Refine failed");
 
     let verified_pairs: Vec<(u32, u32)> = verified_build.into_iter().zip(verified_probe).collect();
-    let uncertain_pairs: Vec<(u32, u32)> = uncertain_build.into_iter().zip(uncertain_probe).collect();
+    let uncertain_pairs: Vec<(u32, u32)> =
+        uncertain_build.into_iter().zip(uncertain_probe).collect();
 
     let (inside, uncertain, outside, mismatches) = verify_two_sided(
         &verified_pairs,
@@ -570,7 +587,11 @@ fn test_gate_1_full_two_sided_soundness() {
     );
 
     // Assertion: GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside over all unique pairs
-    assert_eq!(mismatches, 0, "Gate 1 full two-sided check failed: found {} mismatches", mismatches);
+    assert_eq!(
+        mismatches, 0,
+        "Gate 1 full two-sided check failed: found {} mismatches",
+        mismatches
+    );
     assert!(inside > 0, "Gate 1 must find verified inside pairs");
     assert!(outside > 0, "Gate 1 must find verified outside pairs");
 }
@@ -583,23 +604,31 @@ fn test_gate_2_full_scale_matrix() {
     let centers = [1e2, 5e5, 1e7, -1e7];
     let radii = [1e-3, 1.0, 1e3, 1e5, 1e6];
 
-    println!("------------------------------------------------------------------------------------------------------");
-    println!("GATE 2 MATRIX: (center, R) in {{1e2, 5e5, 1e7, -1e7}} x {{1e-3, 1, 1e3, 1e5, 1e6}} (Two-Sided Check)");
-    println!("------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "GATE 2 MATRIX: (center, R) in {{1e2, 5e5, 1e7, -1e7}} x {{1e-3, 1, 1e3, 1e5, 1e6}} (Two-Sided Check)"
+    );
+    println!(
+        "------------------------------------------------------------------------------------------------------"
+    );
 
     for &cx in &centers {
         for &r in &radii {
             refiner.clear().unwrap();
 
-            let (polys, probes, candidate_pairs) =
-                generate_adversarial_suite(cx, cx, r, 12345);
+            let (polys, probes, candidate_pairs) = generate_adversarial_suite(cx, cx, r, 12345);
 
             let poly_wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
-            let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let poly_slices: Vec<Option<&[u8]>> =
+                poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
             let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
 
-            let probe_wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
-            let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let probe_wkbs: Vec<Vec<u8>> =
+                probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+            let probe_slices: Vec<Option<&[u8]>> =
+                probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
             let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
 
             refiner.push_build(&poly_array).unwrap();
@@ -625,8 +654,10 @@ fn test_gate_2_full_scale_matrix() {
                 )
                 .unwrap();
 
-            let verified_pairs: Vec<(u32, u32)> = verified_build.into_iter().zip(verified_probe).collect();
-            let uncertain_pairs: Vec<(u32, u32)> = uncertain_build.into_iter().zip(uncertain_probe).collect();
+            let verified_pairs: Vec<(u32, u32)> =
+                verified_build.into_iter().zip(verified_probe).collect();
+            let uncertain_pairs: Vec<(u32, u32)> =
+                uncertain_build.into_iter().zip(uncertain_probe).collect();
 
             let (_inside, uncertain, _outside, mismatches) = verify_two_sided(
                 &verified_pairs,
@@ -640,14 +671,27 @@ fn test_gate_2_full_scale_matrix() {
 
             println!(
                 "[GATE 2 CELL] Center: {:+1.0e} | R: {:1.0e} | Pairs: {:5} | Mismatches: {} | Uncertain: {:.2}% | asserts GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside",
-                cx, r, candidate_pairs.len(), mismatches, uncertain_rate * 100.0
+                cx,
+                r,
+                candidate_pairs.len(),
+                mismatches,
+                uncertain_rate * 100.0
             );
 
-            assert_eq!(mismatches, 0, "Cell center: {}, R: {} failed with {} mismatches", cx, r, mismatches);
+            assert_eq!(
+                mismatches, 0,
+                "Cell center: {}, R: {} failed with {} mismatches",
+                cx, r, mismatches
+            );
         }
     }
-    println!("------------------------------------------------------------------------------------------------------");
-    println!("Gate 2: All 20 cells in scale matrix passed with 0 mismatches on {}", device_name);
+    println!(
+        "------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "Gate 2: All 20 cells in scale matrix passed with 0 mismatches on {}",
+        device_name
+    );
 }
 
 #[test]
@@ -719,7 +763,10 @@ fn test_gate_3_deterministic_uniform_lattice() {
         uncertain_rate * 100.0
     );
 
-    assert!(uncertain_rate < 0.05, "Uncertainty rate for deterministic lattice points must be < 5%");
+    assert!(
+        uncertain_rate < 0.05,
+        "Uncertainty rate for deterministic lattice points must be < 5%"
+    );
 }
 
 #[test]
@@ -734,24 +781,15 @@ fn test_gate_4_mixed_types_and_degeneracies_both_sides() {
     // 4: Corrupt bytes
     let valid_poly = make_multipoly_wkb(&MultiPolyDef {
         parts: vec![PolyPart {
-            rings: vec![vec![
-                (0.0, 0.0),
-                (10.0, 0.0),
-                (10.0, 10.0),
-                (0.0, 10.0),
-            ]],
+            rings: vec![vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]],
         }],
     });
     let nan_poly = make_point_wkb(f64::NAN, 1.0); // wrong type and nan
     let empty_wkb = vec![1u8, 3, 0, 0, 0, 0, 0, 0, 0];
     let corrupt_wkb = vec![1u8, 3, 0];
     // 5: Unclosed ring (omits closing vertex)
-    let unclosed_poly = make_unclosed_poly_wkb(&[vec![
-        (0.0, 0.0),
-        (10.0, 0.0),
-        (10.0, 10.0),
-        (0.0, 10.0),
-    ]]);
+    let unclosed_poly =
+        make_unclosed_poly_wkb(&[vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]]);
     // 6: Degenerate ring with 2 vertices
     let degen_2_poly = make_degenerate_poly_wkb(2);
     // 7: Degenerate ring with 1 vertex
@@ -832,7 +870,8 @@ fn test_gate_4_mixed_types_and_degeneracies_both_sides() {
 
     println!(
         "[GATE 4 REPORT] Verified: {:?} | Uncertain count: {} | asserts mixed/nan/out-of-range rows route to uncertain with indices intact",
-        verified_probe, uncertain_probe.len()
+        verified_probe,
+        uncertain_probe.len()
     );
 
     // Pairs (0, 0) and (5, 0) are valid and inside (polygon 5 is unclosed ring, correctly closed and verified)
@@ -858,12 +897,7 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
 
     let poly = make_multipoly_wkb(&MultiPolyDef {
         parts: vec![PolyPart {
-            rings: vec![vec![
-                (0.0, 0.0),
-                (10.0, 0.0),
-                (10.0, 10.0),
-                (0.0, 10.0),
-            ]],
+            rings: vec![vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]],
         }],
     });
     let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly.as_slice())]));
@@ -890,7 +924,10 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
         .unwrap();
 
     // Must route to uncertain with intact indices and zero panics
-    assert!(v_b.is_empty(), "Point on build side cannot produce verified matches");
+    assert!(
+        v_b.is_empty(),
+        "Point on build side cannot produce verified matches"
+    );
     assert_eq!(u_b, vec![0]);
     assert_eq!(u_p, vec![0]);
 
@@ -900,9 +937,9 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
     refiner.finish_building().unwrap();
 
     let probes = vec![
-        make_point_wkb(5.0, 5.0),   // interior
-        make_point_wkb(15.0, 5.0),  // exterior
-        make_point_wkb(10.0, 5.0),  // boundary
+        make_point_wkb(5.0, 5.0),  // interior
+        make_point_wkb(15.0, 5.0), // exterior
+        make_point_wkb(10.0, 5.0), // boundary
     ];
     let probe_slices: Vec<Option<&[u8]>> = probes.iter().map(|w| Some(w.as_slice())).collect();
     let probe_arr: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
@@ -932,7 +969,10 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
         vp2, up2
     );
     assert_eq!(vp2, vec![0], "Interior point 0 must be verified");
-    assert!(up2.contains(&2), "Boundary point 2 must be routed to uncertain");
+    assert!(
+        up2.contains(&2),
+        "Boundary point 2 must be routed to uncertain"
+    );
 
     // Case (c): ContainerSide::Probe with strictly interior points (Gate 6 Inversion Gate)
     let mut vb3 = Vec::new();
@@ -953,7 +993,10 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
         )
         .unwrap();
 
-    assert!(vb3.is_empty(), "ContainerSide::Probe must produce exactly zero verified pairs from GPU");
+    assert!(
+        vb3.is_empty(),
+        "ContainerSide::Probe must produce exactly zero verified pairs from GPU"
+    );
     assert_eq!(ub3.len(), 3);
 }
 
@@ -981,7 +1024,8 @@ fn test_gate_7_teeth_test_adversarial_v1_vs_v2_bound() {
     let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = candidate_pairs.iter().copied().unzip();
 
     let run_mode = |mode: i32| -> (usize, usize, usize, usize) {
-        let mut refiner = MetalSpatialRefiner::try_new_with_mode(mode).expect("Failed to create refiner");
+        let mut refiner =
+            MetalSpatialRefiner::try_new_with_mode(mode).expect("Failed to create refiner");
         refiner.push_build(&poly_array).unwrap();
         refiner.finish_building().unwrap();
 
@@ -1006,48 +1050,70 @@ fn test_gate_7_teeth_test_adversarial_v1_vs_v2_bound() {
         let verified: Vec<(u32, u32)> = vb.into_iter().zip(vp).collect();
         let uncertain: Vec<(u32, u32)> = ub.into_iter().zip(up).collect();
 
-        verify_two_sided(
-            &verified,
-            &uncertain,
-            &candidate_pairs,
-            &polys,
-            &probes,
-        )
+        verify_two_sided(&verified, &uncertain, &candidate_pairs, &polys, &probes)
     };
 
     // Mode 0: Certified v2 (All guards ON: v2 det bound, full band, double-single delta)
     let (v2_in, v2_unc, v2_out, v2_mismatches) = run_mode(0);
     println!(
         "[GATE 7 TEETH TEST - MODE 0 (V2 CERTIFIED)] Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
-        candidate_pairs.len(), v2_in, v2_out, v2_unc, v2_mismatches
+        candidate_pairs.len(),
+        v2_in,
+        v2_out,
+        v2_unc,
+        v2_mismatches
     );
 
     // Mode 1: v1 det bound only (flawed v1 det bound, band ON, double-single delta ON)
     let (m1_in, m1_unc, m1_out, m1_mismatches) = run_mode(1);
     println!(
         "[GATE 7 TEETH TEST - MODE 1 (V1 DET ONLY)]  Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
-        candidate_pairs.len(), m1_in, m1_out, m1_unc, m1_mismatches
+        candidate_pairs.len(),
+        m1_in,
+        m1_out,
+        m1_unc,
+        m1_mismatches
     );
 
     // Mode 2: band off only (v2 det bound ON, double-single delta ON, eta-band OFF)
     let (m2_in, m2_unc, m2_out, m2_mismatches) = run_mode(2);
     println!(
         "[GATE 7 TEETH TEST - MODE 2 (BAND OFF ONLY)] Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
-        candidate_pairs.len(), m2_in, m2_out, m2_unc, m2_mismatches
+        candidate_pairs.len(),
+        m2_in,
+        m2_out,
+        m2_unc,
+        m2_mismatches
     );
 
     // Mode 3: naive delta only (v2 det bound ON, band ON, naive single-precision delta)
     let (m3_in, m3_unc, m3_out, m3_mismatches) = run_mode(3);
     println!(
         "[GATE 7 TEETH TEST - MODE 3 (NAIVE DELTA)]  Pairs: {} | Inside: {} | Outside: {} | Uncertain: {} | Mismatches: {}",
-        candidate_pairs.len(), m3_in, m3_out, m3_unc, m3_mismatches
+        candidate_pairs.len(),
+        m3_in,
+        m3_out,
+        m3_unc,
+        m3_mismatches
     );
 
     // Assertions:
-    assert_eq!(v2_mismatches, 0, "Mode 0 (v2 certified) MUST produce exactly 0 mismatches!");
-    assert!(m1_mismatches > 0, "Mode 1 (v1 det only) MUST produce > 0 mismatches!");
-    assert!(m2_mismatches > 0, "Mode 2 (band off only) MUST produce > 0 mismatches!");
-    assert!(m3_mismatches > 0, "Mode 3 (naive delta only) MUST produce > 0 mismatches!");
+    assert_eq!(
+        v2_mismatches, 0,
+        "Mode 0 (v2 certified) MUST produce exactly 0 mismatches!"
+    );
+    assert!(
+        m1_mismatches > 0,
+        "Mode 1 (v1 det only) MUST produce > 0 mismatches!"
+    );
+    assert!(
+        m2_mismatches > 0,
+        "Mode 2 (band off only) MUST produce > 0 mismatches!"
+    );
+    assert!(
+        m3_mismatches > 0,
+        "Mode 3 (naive delta only) MUST produce > 0 mismatches!"
+    );
 }
 
 #[test]
@@ -1058,9 +1124,15 @@ fn test_star_polygons_honest_uncertain_rate() {
     let cx = 0.0;
     let cy = 0.0;
 
-    println!("------------------------------------------------------------------------------------------------------");
-    println!("HONEST UNCERTAIN RATE BENCHMARK (Uniformly Random Probes on Random Star Polygons with Full Band)");
-    println!("------------------------------------------------------------------------------------------------------");
+    println!(
+        "------------------------------------------------------------------------------------------------------"
+    );
+    println!(
+        "HONEST UNCERTAIN RATE BENCHMARK (Uniformly Random Probes on Random Star Polygons with Full Band)"
+    );
+    println!(
+        "------------------------------------------------------------------------------------------------------"
+    );
 
     for &n_verts in &[8, 64, 512, 2000] {
         refiner.clear().unwrap();
@@ -1085,12 +1157,14 @@ fn test_star_polygons_honest_uncertain_rate() {
             probe_wkbs.push(make_point_wkb(px, py));
         }
 
-        let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+        let probe_slices: Vec<Option<&[u8]>> =
+            probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
         let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
 
         let cand_b = vec![0u32; num_probes];
         let cand_p: Vec<u32> = (0..num_probes as u32).collect();
-        let candidate_pairs: Vec<(u32, u32)> = cand_b.iter().copied().zip(cand_p.iter().copied()).collect();
+        let candidate_pairs: Vec<(u32, u32)> =
+            cand_b.iter().copied().zip(cand_p.iter().copied()).collect();
 
         let mut vb = Vec::new();
         let mut vp = Vec::new();
@@ -1127,7 +1201,10 @@ fn test_star_polygons_honest_uncertain_rate() {
             n_verts, num_probes, inside, outside, uncertain, rate, mismatches
         );
 
-        assert_eq!(mismatches, 0, "Honest random probe test produced mismatches!");
+        assert_eq!(
+            mismatches, 0,
+            "Honest random probe test produced mismatches!"
+        );
     }
 }
 
@@ -1212,7 +1289,11 @@ fn test_c1_ewkb_end_to_end_in_gpu_refiner() {
     );
 
     // All 6 EWKB flavours must correctly classify interior point (probe 0) as verified!
-    assert_eq!(vb.len(), 6, "All 6 EWKB polygon variants must be verified for interior point");
+    assert_eq!(
+        vb.len(),
+        6,
+        "All 6 EWKB polygon variants must be verified for interior point"
+    );
     for b in 0..6 {
         assert!(vb.contains(&b));
     }
@@ -1229,38 +1310,76 @@ fn make_ewkb_polygon(
     buf.push(if is_be { 0u8 } else { 1u8 });
 
     let mut geom_type: u32 = 3;
-    if with_z { geom_type |= 0x80000000; }
-    if with_m { geom_type |= 0x40000000; }
-    if with_srid { geom_type |= 0x20000000; }
+    if with_z {
+        geom_type |= 0x80000000;
+    }
+    if with_m {
+        geom_type |= 0x40000000;
+    }
+    if with_srid {
+        geom_type |= 0x20000000;
+    }
 
     let mut u32_buf = [0u8; 4];
-    if is_be { BigEndian::write_u32(&mut u32_buf, geom_type); } else { LittleEndian::write_u32(&mut u32_buf, geom_type); }
+    if is_be {
+        BigEndian::write_u32(&mut u32_buf, geom_type);
+    } else {
+        LittleEndian::write_u32(&mut u32_buf, geom_type);
+    }
     buf.extend_from_slice(&u32_buf);
 
     if with_srid {
-        if is_be { BigEndian::write_u32(&mut u32_buf, 4326); } else { LittleEndian::write_u32(&mut u32_buf, 4326); }
+        if is_be {
+            BigEndian::write_u32(&mut u32_buf, 4326);
+        } else {
+            LittleEndian::write_u32(&mut u32_buf, 4326);
+        }
         buf.extend_from_slice(&u32_buf);
     }
 
-    if is_be { BigEndian::write_u32(&mut u32_buf, rings.len() as u32); } else { LittleEndian::write_u32(&mut u32_buf, rings.len() as u32); }
+    if is_be {
+        BigEndian::write_u32(&mut u32_buf, rings.len() as u32);
+    } else {
+        LittleEndian::write_u32(&mut u32_buf, rings.len() as u32);
+    }
     buf.extend_from_slice(&u32_buf);
 
     for ring in rings {
-        if is_be { BigEndian::write_u32(&mut u32_buf, ring.len() as u32); } else { LittleEndian::write_u32(&mut u32_buf, ring.len() as u32); }
+        if is_be {
+            BigEndian::write_u32(&mut u32_buf, ring.len() as u32);
+        } else {
+            LittleEndian::write_u32(&mut u32_buf, ring.len() as u32);
+        }
         buf.extend_from_slice(&u32_buf);
 
         for &(x, y) in *ring {
             let mut f64_buf = [0u8; 8];
-            if is_be { BigEndian::write_f64(&mut f64_buf, x); } else { LittleEndian::write_f64(&mut f64_buf, x); }
+            if is_be {
+                BigEndian::write_f64(&mut f64_buf, x);
+            } else {
+                LittleEndian::write_f64(&mut f64_buf, x);
+            }
             buf.extend_from_slice(&f64_buf);
-            if is_be { BigEndian::write_f64(&mut f64_buf, y); } else { LittleEndian::write_f64(&mut f64_buf, y); }
+            if is_be {
+                BigEndian::write_f64(&mut f64_buf, y);
+            } else {
+                LittleEndian::write_f64(&mut f64_buf, y);
+            }
             buf.extend_from_slice(&f64_buf);
             if with_z {
-                if is_be { BigEndian::write_f64(&mut f64_buf, 42.0); } else { LittleEndian::write_f64(&mut f64_buf, 42.0); }
+                if is_be {
+                    BigEndian::write_f64(&mut f64_buf, 42.0);
+                } else {
+                    LittleEndian::write_f64(&mut f64_buf, 42.0);
+                }
                 buf.extend_from_slice(&f64_buf);
             }
             if with_m {
-                if is_be { BigEndian::write_f64(&mut f64_buf, 100.0); } else { LittleEndian::write_f64(&mut f64_buf, 100.0); }
+                if is_be {
+                    BigEndian::write_f64(&mut f64_buf, 100.0);
+                } else {
+                    LittleEndian::write_f64(&mut f64_buf, 100.0);
+                }
                 buf.extend_from_slice(&f64_buf);
             }
         }
@@ -1298,12 +1417,7 @@ fn test_concurrent_multi_threaded_refiner() {
 
     let poly = MultiPolyDef {
         parts: vec![PolyPart {
-            rings: vec![vec![
-                (10.0, 10.0),
-                (50.0, 10.0),
-                (50.0, 50.0),
-                (10.0, 50.0),
-            ]],
+            rings: vec![vec![(10.0, 10.0), (50.0, 10.0), (50.0, 50.0), (10.0, 50.0)]],
         }],
     };
     let poly_wkb = make_multipoly_wkb(&poly);
@@ -1322,7 +1436,10 @@ fn test_concurrent_multi_threaded_refiner() {
         (60.0, 60.0), // outside
         (20.0, 40.0), // inside
     ];
-    let probe_wkbs: Vec<Vec<u8>> = test_points.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+    let probe_wkbs: Vec<Vec<u8>> = test_points
+        .iter()
+        .map(|&(x, y)| make_point_wkb(x, y))
+        .collect();
     let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
     let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
 
@@ -1334,16 +1451,18 @@ fn test_concurrent_multi_threaded_refiner() {
     let mut base_v_p = Vec::new();
     let mut base_u_b = Vec::new();
     let mut base_u_p = Vec::new();
-    refiner.refine(
-        &probe_array,
-        ContainerSide::Build,
-        &candidate_build,
-        &candidate_probe,
-        &mut base_v_b,
-        &mut base_v_p,
-        &mut base_u_b,
-        &mut base_u_p,
-    ).unwrap();
+    refiner
+        .refine(
+            &probe_array,
+            ContainerSide::Build,
+            &candidate_build,
+            &candidate_probe,
+            &mut base_v_b,
+            &mut base_v_p,
+            &mut base_u_b,
+            &mut base_u_p,
+        )
+        .unwrap();
 
     // 8 concurrent threads sharing the same refiner
     let mut handles = Vec::new();
@@ -1370,10 +1489,19 @@ fn test_concurrent_multi_threaded_refiner() {
                 &mut th_v_p,
                 &mut th_u_b,
                 &mut th_u_p,
-            ).expect(&format!("Thread {} failed refine", thread_id));
+            )
+            .expect(&format!("Thread {} failed refine", thread_id));
 
-            assert_eq!(th_v_p, expected_v_p, "Thread {} verified probe mismatch", thread_id);
-            assert_eq!(th_u_p, expected_u_p, "Thread {} uncertain probe mismatch", thread_id);
+            assert_eq!(
+                th_v_p, expected_v_p,
+                "Thread {} verified probe mismatch",
+                thread_id
+            );
+            assert_eq!(
+                th_u_p, expected_u_p,
+                "Thread {} uncertain probe mismatch",
+                thread_id
+            );
         }));
     }
 
@@ -1381,6 +1509,8 @@ fn test_concurrent_multi_threaded_refiner() {
         h.join().unwrap();
     }
 
-    println!("P5: 8-thread concurrent refiner test passed on {}", device_name);
+    println!(
+        "P5: 8-thread concurrent refiner test passed on {}",
+        device_name
+    );
 }
-

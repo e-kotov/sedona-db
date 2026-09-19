@@ -34,7 +34,8 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device)
       buf_rings_(nil),
       buf_vertices_(nil),
       is_built_(false),
-      allocated_bytes_(0)
+      allocated_bytes_(0),
+      num_polygons_(0)
 {
     @autoreleasepool {
         if (!device_) {
@@ -129,6 +130,7 @@ void MetalSpatialRefiner::clear() {
 
         is_built_ = false;
         allocated_bytes_ = 0;
+        num_polygons_ = 0;
         last_error_.clear();
     }
 }
@@ -208,7 +210,19 @@ void MetalSpatialRefiner::finish_building() {
             throw std::runtime_error("Metal buffer allocation failed");
         }
 
+        num_polygons_ = static_cast<uint32_t>(host_polygons_.size());
         allocated_bytes_ = poly_size + part_size + ring_size + vert_size;
+
+        // Free host geometry vectors to release resident host memory
+        host_polygons_.clear();
+        host_polygons_.shrink_to_fit();
+        host_parts_.clear();
+        host_parts_.shrink_to_fit();
+        host_rings_.clear();
+        host_rings_.shrink_to_fit();
+        host_vertices_.clear();
+        host_vertices_.shrink_to_fit();
+
         is_built_ = true;
     }
 }
@@ -237,7 +251,7 @@ void MetalSpatialRefiner::refine(
             throw std::runtime_error("Buffer allocation failed");
         }
 
-        uint32_t num_polygons = (uint32_t)host_polygons_.size();
+        uint32_t num_polygons = num_polygons_;
         const uint32_t CHUNK_SIZE = 65536;
 
         for (uint32_t offset = 0; offset < candidate_count; offset += CHUNK_SIZE) {

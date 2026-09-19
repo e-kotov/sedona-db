@@ -19,11 +19,12 @@ use std::fs;
 
 fn generate_shader_header() {
     let bvh_src = fs::read_to_string("bvh.metal").expect("Failed to read bvh.metal");
-    let hash_src = fs::read_to_string("spatial_hash.metal").expect("Failed to read spatial_hash.metal");
+    let hash_src =
+        fs::read_to_string("spatial_hash.metal").expect("Failed to read spatial_hash.metal");
     let refine_src = fs::read_to_string("refine.metal").unwrap_or_default();
 
     let header_content = format!(
-r#"// Licensed to the Apache Software Foundation (ASF) under one
+        r#"// Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
 // regarding copyright ownership.  The ASF licenses this file
@@ -93,7 +94,6 @@ fn main() {
         }
 
         build.compile("sedona_metalspatial");
-
 
         println!("cargo:rustc-link-lib=framework=Metal");
         println!("cargo:rustc-link-lib=framework=Foundation");
