@@ -60,6 +60,10 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install system dependencies (GEOS)
+        run: |
+          brew install geos
+
       - name: Run sedona-metalspatial Tests (Gates 1-7, Flattener, Refiner, and Index)
         run: |
           cargo test -p sedona-metalspatial -- --nocapture
