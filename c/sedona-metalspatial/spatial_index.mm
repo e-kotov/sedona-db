@@ -42,11 +42,13 @@ kernel void rt_probe_points(
     device atomic_uint*              match_count  [[buffer(4)]],
     constant uint&                   num_probes   [[buffer(5)]],
     constant uint&                   max_results  [[buffer(6)]],
+    constant uint&                   probe_offset [[buffer(7)]],
     uint                             tid          [[thread_position_in_grid]])
 {
     if (tid >= num_probes) return;
 
-    BoundingBox probe = probe_boxes[tid];
+    uint probe_idx = probe_offset + tid;
+    BoundingBox probe = probe_boxes[probe_idx];
     if (!is_valid_box(probe)) return;
 
     float px = probe.xmin;
@@ -66,7 +68,7 @@ kernel void rt_probe_points(
             if (is_valid_box(b) && px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
                 uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
                 if (slot < max_results) {
-                    output_pairs[slot] = MatchPair{build_id, tid};
+                    output_pairs[slot] = MatchPair{build_id, probe_idx};
                 }
             }
         }
@@ -74,7 +76,7 @@ kernel void rt_probe_points(
 }
 )";
 
-// MSL Source for Fast Compute Spatial Hash (2D Uniform Grid)
+// MSL Source for Fast Compute Hierarchical Grid Index
 static const char* SPATIAL_HASH_METAL_SOURCE = R"(
 #include <metal_stdlib>
 using namespace metal;
@@ -91,16 +93,22 @@ struct MatchPair {
     uint probe_idx;
 };
 
-struct GridParams {
-    float min_x;
-    float min_y;
+struct GridLevelParams {
     float cell_w;
     float cell_h;
-    uint  grid_dim_x;
-    uint  grid_dim_y;
+    uint  grid_dim;
+    uint  cell_offset;
+};
+
+struct HierarchicalGridParams {
+    float min_x;
+    float min_y;
+    uint  num_levels;
     uint  num_build;
     uint  num_probe;
+    uint  probe_offset;
     uint  max_results;
+    GridLevelParams levels[4];
 };
 
 inline bool is_valid_box(BoundingBox b) {
@@ -114,55 +122,75 @@ inline bool boxes_intersect(BoundingBox a, BoundingBox b) {
     return !(a.xmax < b.xmin || a.xmin > b.xmax || a.ymax < b.ymin || a.ymin > b.ymax);
 }
 
-inline void get_cell_range(BoundingBox b, constant GridParams& p,
-                           thread int& min_cx, thread int& max_cx,
-                           thread int& min_cy, thread int& max_cy)
+inline void get_level_cell_range(BoundingBox b, constant HierarchicalGridParams& p, uint level,
+                                 thread int& min_cx, thread int& max_cx,
+                                 thread int& min_cy, thread int& max_cy)
 {
-    min_cx = clamp(int((b.xmin - p.min_x) / p.cell_w), 0, int(p.grid_dim_x - 1));
-    max_cx = clamp(int((b.xmax - p.min_x) / p.cell_w), 0, int(p.grid_dim_x - 1));
-    min_cy = clamp(int((b.ymin - p.min_y) / p.cell_h), 0, int(p.grid_dim_y - 1));
-    max_cy = clamp(int((b.ymax - p.min_y) / p.cell_h), 0, int(p.grid_dim_y - 1));
+    constant GridLevelParams& lp = p.levels[level];
+    min_cx = clamp(int((b.xmin - p.min_x) / lp.cell_w), 0, int(lp.grid_dim - 1));
+    max_cx = clamp(int((b.xmax - p.min_x) / lp.cell_w), 0, int(lp.grid_dim - 1));
+    min_cy = clamp(int((b.ymin - p.min_y) / lp.cell_h), 0, int(lp.grid_dim - 1));
+    max_cy = clamp(int((b.ymax - p.min_y) / lp.cell_h), 0, int(lp.grid_dim - 1));
+}
+
+inline uint select_level_for_box(BoundingBox b, constant HierarchicalGridParams& p) {
+    // Select the finest level where box covers at most 4 cells
+    for (int lvl = int(p.num_levels - 1); lvl > 0; --lvl) {
+        int min_cx, max_cx, min_cy, max_cy;
+        get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
+        int count = (max_cx - min_cx + 1) * (max_cy - min_cy + 1);
+        if (count <= 4) {
+            return lvl;
+        }
+    }
+    return 0;
 }
 
 kernel void count_cell_entries(
-    device const BoundingBox* boxes       [[buffer(0)]],
-    device atomic_uint*       cell_counts [[buffer(1)]],
-    constant GridParams&      p           [[buffer(2)]],
-    uint                      tid         [[thread_position_in_grid]])
+    device const BoundingBox*             boxes       [[buffer(0)]],
+    device atomic_uint*                   cell_counts [[buffer(1)]],
+    constant HierarchicalGridParams&      p           [[buffer(2)]],
+    uint                                  tid         [[thread_position_in_grid]])
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
     if (!is_valid_box(b)) return;
 
+    uint lvl = select_level_for_box(b, p);
+    constant GridLevelParams& lp = p.levels[lvl];
+
     int min_cx, max_cx, min_cy, max_cy;
-    get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
+    get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
 
     for (int y = min_cy; y <= max_cy; ++y) {
         for (int x = min_cx; x <= max_cx; ++x) {
-            uint cell_idx = y * p.grid_dim_x + x;
+            uint cell_idx = lp.cell_offset + y * lp.grid_dim + x;
             atomic_fetch_add_explicit(&cell_counts[cell_idx], 1, memory_order_relaxed);
         }
     }
 }
 
 kernel void populate_cells(
-    device const BoundingBox* boxes        [[buffer(0)]],
-    device atomic_uint*       cell_heads   [[buffer(1)]],
-    device const uint*        cell_offsets [[buffer(2)]],
-    device uint*              cell_entries [[buffer(3)]],
-    constant GridParams&      p            [[buffer(4)]],
-    uint                      tid          [[thread_position_in_grid]])
+    device const BoundingBox*             boxes        [[buffer(0)]],
+    device atomic_uint*                   cell_heads   [[buffer(1)]],
+    device const uint*                    cell_offsets [[buffer(2)]],
+    device uint*                          cell_entries [[buffer(3)]],
+    constant HierarchicalGridParams&      p            [[buffer(4)]],
+    uint                                  tid          [[thread_position_in_grid]])
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
     if (!is_valid_box(b)) return;
 
+    uint lvl = select_level_for_box(b, p);
+    constant GridLevelParams& lp = p.levels[lvl];
+
     int min_cx, max_cx, min_cy, max_cy;
-    get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
+    get_level_cell_range(b, p, lvl, min_cx, max_cx, min_cy, max_cy);
 
     for (int y = min_cy; y <= max_cy; ++y) {
         for (int x = min_cx; x <= max_cx; ++x) {
-            uint cell_idx = y * p.grid_dim_x + x;
+            uint cell_idx = lp.cell_offset + y * lp.grid_dim + x;
             uint slot = atomic_fetch_add_explicit(&cell_heads[cell_idx], 1, memory_order_relaxed);
             cell_entries[cell_offsets[cell_idx] + slot] = tid;
         }
@@ -170,45 +198,49 @@ kernel void populate_cells(
 }
 
 kernel void probe_grid(
-    device const BoundingBox* build_boxes  [[buffer(0)]],
-    device const BoundingBox* probe_boxes  [[buffer(1)]],
-    device const uint*        cell_offsets [[buffer(2)]],
-    device const uint*        cell_entries [[buffer(3)]],
-    device MatchPair*         output_pairs [[buffer(4)]],
-    device atomic_uint*       match_count  [[buffer(5)]],
-    constant GridParams&      p            [[buffer(6)]],
-    uint                      tid          [[thread_position_in_grid]])
+    device const BoundingBox*             build_boxes  [[buffer(0)]],
+    device const BoundingBox*             probe_boxes  [[buffer(1)]],
+    device const uint*                    cell_offsets [[buffer(2)]],
+    device const uint*                    cell_entries [[buffer(3)]],
+    device MatchPair*                     output_pairs [[buffer(4)]],
+    device atomic_uint*                   match_count  [[buffer(5)]],
+    constant HierarchicalGridParams&      p            [[buffer(6)]],
+    uint                                  tid          [[thread_position_in_grid]])
 {
     if (tid >= p.num_probe || p.num_build == 0) return;
-    BoundingBox probe = probe_boxes[tid];
+    uint probe_idx = p.probe_offset + tid;
+    BoundingBox probe = probe_boxes[probe_idx];
     if (!is_valid_box(probe)) return;
 
-    float max_grid_x = p.min_x + p.cell_w * float(p.grid_dim_x);
-    float max_grid_y = p.min_y + p.cell_h * float(p.grid_dim_y);
-    if (probe.xmax < p.min_x || probe.xmin > max_grid_x ||
-        probe.ymax < p.min_y || probe.ymin > max_grid_y) {
-        return;
-    }
+    for (uint lvl = 0; lvl < p.num_levels; ++lvl) {
+        constant GridLevelParams& lp = p.levels[lvl];
+        float max_grid_x = p.min_x + lp.cell_w * float(lp.grid_dim);
+        float max_grid_y = p.min_y + lp.cell_h * float(lp.grid_dim);
+        if (probe.xmax < p.min_x || probe.xmin > max_grid_x ||
+            probe.ymax < p.min_y || probe.ymin > max_grid_y) {
+            continue;
+        }
 
-    int p_min_cx, p_max_cx, p_min_cy, p_max_cy;
-    get_cell_range(probe, p, p_min_cx, p_max_cx, p_min_cy, p_max_cy);
+        int p_min_cx, p_max_cx, p_min_cy, p_max_cy;
+        get_level_cell_range(probe, p, lvl, p_min_cx, p_max_cx, p_min_cy, p_max_cy);
 
-    for (int cy = p_min_cy; cy <= p_max_cy; ++cy) {
-        for (int cx = p_min_cx; cx <= p_max_cx; ++cx) {
-            uint cell_idx = cy * p.grid_dim_x + cx;
-            uint start = cell_offsets[cell_idx];
-            uint end = cell_offsets[cell_idx + 1];
+        for (int cy = p_min_cy; cy <= p_max_cy; ++cy) {
+            for (int cx = p_min_cx; cx <= p_max_cx; ++cx) {
+                uint cell_idx = lp.cell_offset + cy * lp.grid_dim + cx;
+                uint start = cell_offsets[cell_idx];
+                uint end = cell_offsets[cell_idx + 1];
 
-            for (uint i = start; i < end; ++i) {
-                uint build_id = cell_entries[i];
-                BoundingBox build = build_boxes[build_id];
-                if (boxes_intersect(build, probe)) {
-                    int b_min_cx, b_max_cx, b_min_cy, b_max_cy;
-                    get_cell_range(build, p, b_min_cx, b_max_cx, b_min_cy, b_max_cy);
-                    if (cx == max(p_min_cx, b_min_cx) && cy == max(p_min_cy, b_min_cy)) {
-                        uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
-                        if (slot < p.max_results) {
-                            output_pairs[slot] = MatchPair{build_id, tid};
+                for (uint i = start; i < end; ++i) {
+                    uint build_id = cell_entries[i];
+                    BoundingBox build = build_boxes[build_id];
+                    if (boxes_intersect(build, probe)) {
+                        int b_min_cx, b_max_cx, b_min_cy, b_max_cy;
+                        get_level_cell_range(build, p, lvl, b_min_cx, b_max_cx, b_min_cy, b_max_cy);
+                        if (cx == max(p_min_cx, b_min_cx) && cy == max(p_min_cy, b_min_cy)) {
+                            uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
+                            if (slot < p.max_results) {
+                                output_pairs[slot] = MatchPair{build_id, probe_idx};
+                            }
                         }
                     }
                 }
@@ -224,16 +256,22 @@ inline bool is_valid_box(const BoundingBox& b) {
              b.xmin > b.xmax || b.ymin > b.ymax);
 }
 
-struct GridParamsInternal {
-    float min_x;
-    float min_y;
+struct GridLevelParamsInternal {
     float cell_w;
     float cell_h;
-    uint32_t grid_dim_x;
-    uint32_t grid_dim_y;
+    uint32_t grid_dim;
+    uint32_t cell_offset;
+};
+
+struct HierarchicalGridParamsInternal {
+    float min_x;
+    float min_y;
+    uint32_t num_levels;
     uint32_t num_build;
     uint32_t num_probe;
+    uint32_t probe_offset;
     uint32_t max_results;
+    GridLevelParamsInternal levels[4];
 };
 
 struct MetalSpatialIndex::Impl {
@@ -260,8 +298,8 @@ struct MetalSpatialIndex::Impl {
     id<MTLAccelerationStructure> rt_accel = nil;
     id<MTLBuffer> buf_rt_bboxes = nil;
 
-    // Spatial Hash Grid structures
-    GridParamsInternal grid_params{};
+    // Hierarchical Grid structures
+    HierarchicalGridParamsInternal hier_params{};
     id<MTLBuffer> buf_grid_offsets = nil;
     id<MTLBuffer> buf_grid_entries = nil;
 
@@ -427,15 +465,14 @@ struct MetalSpatialIndex::Impl {
 
             if (valid_count == 0) {
                 // All boxes are NaN/Inf/invalid. Handle gracefully: empty index, 0 matches.
-                grid_params.min_x = 0.0f;
-                grid_params.min_y = 0.0f;
-                grid_params.cell_w = 1.0f;
-                grid_params.cell_h = 1.0f;
-                grid_params.grid_dim_x = 1;
-                grid_params.grid_dim_y = 1;
-                grid_params.num_build = 0;
-                grid_params.num_probe = 0;
-                grid_params.max_results = 0;
+                hier_params.min_x = 0.0f;
+                hier_params.min_y = 0.0f;
+                hier_params.num_levels = 1;
+                hier_params.num_build = 0;
+                hier_params.num_probe = 0;
+                hier_params.probe_offset = 0;
+                hier_params.max_results = 0;
+                hier_params.levels[0] = {1.0f, 1.0f, 1, 0};
 
                 std::vector<uint32_t> offsets(2, 0);
                 buf_grid_offsets = [device newBufferWithBytes:offsets.data()
@@ -450,20 +487,35 @@ struct MetalSpatialIndex::Impl {
                 return true;
             }
 
-            // Grid resolution: heuristically balance cell occupancy
-            uint32_t grid_dim = static_cast<uint32_t>(std::clamp(static_cast<float>(std::sqrt(valid_count) * 1.2), 32.0f, 512.0f));
-            uint32_t num_cells = grid_dim * grid_dim;
-
             float span_x = std::max(max_x - min_x, 1e-4f);
             float span_y = std::max(max_y - min_y, 1e-4f);
 
-            grid_params.min_x = min_x - span_x * 0.001f;
-            grid_params.min_y = min_y - span_y * 0.001f;
-            grid_params.cell_w = (span_x * 1.002f) / grid_dim;
-            grid_params.cell_h = (span_y * 1.002f) / grid_dim;
-            grid_params.grid_dim_x = grid_dim;
-            grid_params.grid_dim_y = grid_dim;
-            grid_params.num_build = n;
+            hier_params.min_x = min_x - span_x * 0.001f;
+            hier_params.min_y = min_y - span_y * 0.001f;
+            float total_w = span_x * 1.002f;
+            float total_h = span_y * 1.002f;
+            hier_params.num_levels = 4;
+            hier_params.num_build = n;
+            hier_params.num_probe = 0;
+            hier_params.probe_offset = 0;
+            hier_params.max_results = 0;
+
+            uint32_t dims[4] = {
+                2,
+                8,
+                32,
+                static_cast<uint32_t>(std::clamp(static_cast<float>(std::sqrt(valid_count) * 1.5f), 64.0f, 256.0f))
+            };
+
+            uint32_t cur_offset = 0;
+            for (uint32_t l = 0; l < 4; ++l) {
+                hier_params.levels[l].grid_dim = dims[l];
+                hier_params.levels[l].cell_offset = cur_offset;
+                hier_params.levels[l].cell_w = total_w / dims[l];
+                hier_params.levels[l].cell_h = total_h / dims[l];
+                cur_offset += dims[l] * dims[l];
+            }
+            uint32_t total_cells = cur_offset;
 
             if (!buf_build_boxes) {
                 buf_build_boxes = [device newBufferWithBytes:build_boxes.data()
@@ -475,23 +527,23 @@ struct MetalSpatialIndex::Impl {
                 }
             }
 
-            id<MTLBuffer> buf_counts = [device newBufferWithLength:sizeof(uint32_t) * num_cells
+            id<MTLBuffer> buf_counts = [device newBufferWithLength:sizeof(uint32_t) * total_cells
                                                            options:MTLResourceStorageModeShared];
             if (!buf_counts) {
                 set_last_error("Failed to allocate grid counts buffer");
                 return false;
             }
-            memset([buf_counts contents], 0, sizeof(uint32_t) * num_cells);
+            memset([buf_counts contents], 0, sizeof(uint32_t) * total_cells);
 
-            id<MTLBuffer> buf_params = [device newBufferWithBytes:&grid_params
-                                                           length:sizeof(GridParamsInternal)
+            id<MTLBuffer> buf_params = [device newBufferWithBytes:&hier_params
+                                                           length:sizeof(HierarchicalGridParamsInternal)
                                                           options:MTLResourceStorageModeShared];
             if (!buf_params) {
                 set_last_error("Failed to allocate grid params buffer");
                 return false;
             }
 
-            // 1. Count entries per cell
+            // 1. Count entries per cell across all levels
             id<MTLCommandBuffer> cmd1 = [queue commandBuffer];
             if (!cmd1) {
                 set_last_error("Failed to create command buffer for count pass");
@@ -516,16 +568,23 @@ struct MetalSpatialIndex::Impl {
                 return false;
             }
 
-            // 2. Prefix sum for cell offsets
+            // 2. Prefix sum for cell offsets with explicit overflow check
             uint32_t* counts = (uint32_t*)[buf_counts contents];
-            std::vector<uint32_t> offsets(num_cells + 1, 0);
-            for (uint32_t i = 0; i < num_cells; ++i) {
-                offsets[i + 1] = offsets[i] + counts[i];
+            std::vector<uint32_t> offsets(total_cells + 1, 0);
+            uint64_t running_total = 0;
+            for (uint32_t i = 0; i < total_cells; ++i) {
+                offsets[i] = static_cast<uint32_t>(running_total);
+                running_total += counts[i];
+                if (running_total > UINT32_MAX) {
+                    set_last_error("Grid cell entries count exceeded 32-bit integer limit");
+                    return false;
+                }
             }
-            uint32_t total_entries = offsets[num_cells];
+            offsets[total_cells] = static_cast<uint32_t>(running_total);
+            uint32_t total_entries = static_cast<uint32_t>(running_total);
 
             buf_grid_offsets = [device newBufferWithBytes:offsets.data()
-                                                   length:sizeof(uint32_t) * (num_cells + 1)
+                                                   length:sizeof(uint32_t) * (total_cells + 1)
                                                   options:MTLResourceStorageModeShared];
             buf_grid_entries = [device newBufferWithLength:sizeof(uint32_t) * std::max(1u, total_entries)
                                                    options:MTLResourceStorageModeShared];
@@ -534,13 +593,13 @@ struct MetalSpatialIndex::Impl {
                 return false;
             }
 
-            id<MTLBuffer> buf_heads = [device newBufferWithLength:sizeof(uint32_t) * num_cells
+            id<MTLBuffer> buf_heads = [device newBufferWithLength:sizeof(uint32_t) * total_cells
                                                           options:MTLResourceStorageModeShared];
             if (!buf_heads) {
                 set_last_error("Failed to allocate grid heads buffer");
                 return false;
             }
-            memset([buf_heads contents], 0, sizeof(uint32_t) * num_cells);
+            memset([buf_heads contents], 0, sizeof(uint32_t) * total_cells);
 
             // 3. Populate cell entries
             id<MTLCommandBuffer> cmd2 = [queue commandBuffer];
@@ -739,85 +798,92 @@ bool MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
         }
         *((uint32_t*)[buf_count contents]) = 0;
 
+        const uint32_t CHUNK_SIZE = 65536;
+
         auto dispatch_query = [&](uint32_t curr_max) -> bool {
-            if (use_rt) {
-                id<MTLBuffer> buf_num_probes = [impl_->device newBufferWithBytes:&count length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-                id<MTLBuffer> buf_max_results = [impl_->device newBufferWithBytes:&curr_max length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-                if (!buf_num_probes || !buf_max_results) {
-                    impl_->set_last_error("Failed to allocate query parameter buffers");
-                    return false;
-                }
+            for (uint32_t probe_offset = 0; probe_offset < count; probe_offset += CHUNK_SIZE) {
+                uint32_t chunk_count = std::min(count - probe_offset, CHUNK_SIZE);
+                if (use_rt) {
+                    id<MTLBuffer> buf_num_probes = [impl_->device newBufferWithBytes:&chunk_count length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+                    id<MTLBuffer> buf_max_results = [impl_->device newBufferWithBytes:&curr_max length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+                    id<MTLBuffer> buf_probe_offset = [impl_->device newBufferWithBytes:&probe_offset length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+                    if (!buf_num_probes || !buf_max_results || !buf_probe_offset) {
+                        impl_->set_last_error("Failed to allocate query parameter buffers");
+                        return false;
+                    }
 
-                id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
-                if (!cmd) {
-                    impl_->set_last_error("Failed to create probe command buffer");
-                    return false;
-                }
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                if (!enc) {
-                    impl_->set_last_error("Failed to create probe compute command encoder");
-                    return false;
-                }
-                [enc setComputePipelineState:impl_->pso_rt_probe];
-                [enc setAccelerationStructure:impl_->rt_accel atBufferIndex:0];
-                [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:1];
-                [enc setBuffer:buf_probe offset:0 atIndex:2];
-                [enc setBuffer:buf_out offset:0 atIndex:3];
-                [enc setBuffer:buf_count offset:0 atIndex:4];
-                [enc setBuffer:buf_num_probes offset:0 atIndex:5];
-                [enc setBuffer:buf_max_results offset:0 atIndex:6];
-                [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-                [enc endEncoding];
-                [cmd commit];
-                [cmd waitUntilCompleted];
-                if ([cmd status] != MTLCommandBufferStatusCompleted) {
-                    NSString* errStr = [cmd.error localizedDescription] ?: @"Error during RT probe execution";
-                    impl_->set_last_error([errStr UTF8String]);
-                    return false;
-                }
-                return true;
-            } else {
-                GridParamsInternal params = impl_->grid_params;
-                params.num_probe = count;
-                params.max_results = curr_max;
+                    id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+                    if (!cmd) {
+                        impl_->set_last_error("Failed to create probe command buffer");
+                        return false;
+                    }
+                    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                    if (!enc) {
+                        impl_->set_last_error("Failed to create probe compute command encoder");
+                        return false;
+                    }
+                    [enc setComputePipelineState:impl_->pso_rt_probe];
+                    [enc setAccelerationStructure:impl_->rt_accel atBufferIndex:0];
+                    [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:1];
+                    [enc setBuffer:buf_probe offset:0 atIndex:2];
+                    [enc setBuffer:buf_out offset:0 atIndex:3];
+                    [enc setBuffer:buf_count offset:0 atIndex:4];
+                    [enc setBuffer:buf_num_probes offset:0 atIndex:5];
+                    [enc setBuffer:buf_max_results offset:0 atIndex:6];
+                    [enc setBuffer:buf_probe_offset offset:0 atIndex:7];
+                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc endEncoding];
+                    [cmd commit];
+                    [cmd waitUntilCompleted];
+                    if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                        NSString* errStr = [cmd.error localizedDescription] ?: @"Error during RT probe execution";
+                        impl_->set_last_error([errStr UTF8String]);
+                        return false;
+                    }
+                } else {
+                    HierarchicalGridParamsInternal params = impl_->hier_params;
+                    params.num_probe = chunk_count;
+                    params.probe_offset = probe_offset;
+                    params.max_results = curr_max;
 
-                id<MTLBuffer> buf_params = [impl_->device newBufferWithBytes:&params
-                                                                      length:sizeof(GridParamsInternal)
-                                                                     options:MTLResourceStorageModeShared];
-                if (!buf_params) {
-                    impl_->set_last_error("Failed to allocate grid params buffer");
-                    return false;
-                }
+                    id<MTLBuffer> buf_params = [impl_->device newBufferWithBytes:&params
+                                                                          length:sizeof(HierarchicalGridParamsInternal)
+                                                                         options:MTLResourceStorageModeShared];
+                    if (!buf_params) {
+                        impl_->set_last_error("Failed to allocate grid params buffer");
+                        return false;
+                    }
 
-                id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
-                if (!cmd) {
-                    impl_->set_last_error("Failed to create probe command buffer");
-                    return false;
+                    id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+                    if (!cmd) {
+                        impl_->set_last_error("Failed to create probe command buffer");
+                        return false;
+                    }
+                    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+                    if (!enc) {
+                        impl_->set_last_error("Failed to create probe compute command encoder");
+                        return false;
+                    }
+                    [enc setComputePipelineState:impl_->pso_grid_probe];
+                    [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:0];
+                    [enc setBuffer:buf_probe offset:0 atIndex:1];
+                    [enc setBuffer:impl_->buf_grid_offsets offset:0 atIndex:2];
+                    [enc setBuffer:impl_->buf_grid_entries offset:0 atIndex:3];
+                    [enc setBuffer:buf_out offset:0 atIndex:4];
+                    [enc setBuffer:buf_count offset:0 atIndex:5];
+                    [enc setBuffer:buf_params offset:0 atIndex:6];
+                    [enc dispatchThreads:MTLSizeMake(chunk_count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [enc endEncoding];
+                    [cmd commit];
+                    [cmd waitUntilCompleted];
+                    if ([cmd status] != MTLCommandBufferStatusCompleted) {
+                        NSString* errStr = [cmd.error localizedDescription] ?: @"Error during grid probe execution";
+                        impl_->set_last_error([errStr UTF8String]);
+                        return false;
+                    }
                 }
-                id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
-                if (!enc) {
-                    impl_->set_last_error("Failed to create probe compute command encoder");
-                    return false;
-                }
-                [enc setComputePipelineState:impl_->pso_grid_probe];
-                [enc setBuffer:impl_->buf_build_boxes offset:0 atIndex:0];
-                [enc setBuffer:buf_probe offset:0 atIndex:1];
-                [enc setBuffer:impl_->buf_grid_offsets offset:0 atIndex:2];
-                [enc setBuffer:impl_->buf_grid_entries offset:0 atIndex:3];
-                [enc setBuffer:buf_out offset:0 atIndex:4];
-                [enc setBuffer:buf_count offset:0 atIndex:5];
-                [enc setBuffer:buf_params offset:0 atIndex:6];
-                [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-                [enc endEncoding];
-                [cmd commit];
-                [cmd waitUntilCompleted];
-                if ([cmd status] != MTLCommandBufferStatusCompleted) {
-                    NSString* errStr = [cmd.error localizedDescription] ?: @"Error during grid probe execution";
-                    impl_->set_last_error([errStr UTF8String]);
-                    return false;
-                }
-                return true;
             }
+            return true;
         };
 
         if (!dispatch_query(max_results)) {

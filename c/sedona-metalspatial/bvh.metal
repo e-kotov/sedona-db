@@ -37,11 +37,13 @@ kernel void rt_probe_points(
     device atomic_uint*              match_count  [[buffer(4)]],
     constant uint&                   num_probes   [[buffer(5)]],
     constant uint&                   max_results  [[buffer(6)]],
+    constant uint&                   probe_offset [[buffer(7)]],
     uint                             tid          [[thread_position_in_grid]])
 {
     if (tid >= num_probes) return;
 
-    BoundingBox probe = probe_boxes[tid];
+    uint probe_idx = probe_offset + tid;
+    BoundingBox probe = probe_boxes[probe_idx];
     if (!is_valid_box(probe)) return;
 
     float px = probe.xmin;
@@ -64,7 +66,7 @@ kernel void rt_probe_points(
             if (is_valid_box(b) && px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
                 uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
                 if (slot < max_results) {
-                    output_pairs[slot] = MatchPair{build_id, tid};
+                    output_pairs[slot] = MatchPair{build_id, probe_idx};
                 }
             }
         }

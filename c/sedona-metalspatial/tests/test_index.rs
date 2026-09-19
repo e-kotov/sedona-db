@@ -301,4 +301,27 @@ fn test_error_handling_and_last_error() {
     assert_eq!(p_res.len(), 1);
 }
 
+#[test]
+fn test_hierarchical_adversarial() {
+    let mut index = MetalSpatialIndex::try_new().expect("Failed to create index");
+
+    // 10,000 full-extent build boxes
+    let n_build = 10_000;
+    let build_boxes = vec![[0.0f32, 0.0, 100.0, 100.0]; n_build];
+    index.push_build(&build_boxes).unwrap();
+    index.finish_building().unwrap();
+
+    // 5 probe boxes
+    let probe_boxes = vec![
+        [10.0f32, 10.0, 20.0, 20.0],
+        [50.0, 50.0, 60.0, 60.0],
+    ];
+
+    let (b_res, p_res) = index.probe(&probe_boxes).unwrap();
+    // Every probe intersects all 10,000 boxes -> 20,000 matches total
+    assert_eq!(b_res.len(), 20_000);
+    assert_eq!(p_res.len(), 20_000);
+}
+
+
 

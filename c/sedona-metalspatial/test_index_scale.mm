@@ -19,6 +19,12 @@ inline bool cpu_boxes_intersect(const BoundingBox& a, const BoundingBox& b) {
     return !(a.xmax < b.xmin || a.xmin > b.xmax || a.ymax < b.ymin || a.ymin > b.ymax);
 }
 
+inline bool cpu_is_valid_box(const BoundingBox& b) {
+    return !(std::isnan(b.xmin) || std::isnan(b.ymin) || std::isnan(b.xmax) || std::isnan(b.ymax) ||
+             std::isinf(b.xmin) || std::isinf(b.ymin) || std::isinf(b.xmax) || std::isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
+
 // Naive O(N * M) CPU ground truth (used for sanity and moderate tests)
 std::set<std::pair<uint32_t, uint32_t>> cpu_naive_join(
     const std::vector<BoundingBox>& build,
@@ -606,6 +612,151 @@ void test_error_handling(id<MTLDevice> device) {
     std::cout << "  Error Handling & Diagnostics: PASS\n";
 }
 
+// =====================================================================
+// Test 8: Hierarchical Grid Adversarial Cases (Item 1.4)
+// =====================================================================
+void test_hierarchical_grid_adversarial(id<MTLDevice> device) {
+    std::cout << "\n--- Test 8: Hierarchical Grid Adversarial Cases (Item 1.4) ---\n";
+
+    auto cpu_oracle = [](const std::vector<BoundingBox>& build, const std::vector<BoundingBox>& probe) {
+        std::vector<std::pair<uint32_t, uint32_t>> matches;
+        for (uint32_t p = 0; p < probe.size(); ++p) {
+            const auto& pb = probe[p];
+            if (!cpu_is_valid_box(pb)) continue;
+            for (uint32_t b = 0; b < build.size(); ++b) {
+                const auto& bb = build[b];
+                if (!cpu_is_valid_box(bb)) continue;
+                if (cpu_boxes_intersect(bb, pb)) {
+                    matches.push_back({b, p});
+                }
+            }
+        }
+        std::sort(matches.begin(), matches.end());
+        return matches;
+    };
+
+    auto verify_matches = [](const std::vector<uint32_t>& out_b, const std::vector<uint32_t>& out_p,
+                             const std::vector<std::pair<uint32_t, uint32_t>>& expected) {
+        assert(out_b.size() == out_p.size());
+        assert(out_b.size() == expected.size());
+        std::vector<std::pair<uint32_t, uint32_t>> actual(out_b.size());
+        for (size_t i = 0; i < out_b.size(); ++i) {
+            actual[i] = {out_b[i], out_p[i]};
+        }
+        std::sort(actual.begin(), actual.end());
+        assert(actual == expected);
+    };
+
+    // Sub-test 8.1: 20k build boxes that each span the full extent
+    {
+        const uint32_t N_BUILD = 20000;
+        const uint32_t N_PROBE = 100;
+        std::vector<BoundingBox> build(N_BUILD, BoundingBox{0.0f, 0.0f, 1000.0f, 1000.0f});
+
+        std::mt19937 rng(1401);
+        std::uniform_real_distribution<float> coord_dist(10.0f, 990.0f);
+        std::uniform_real_distribution<float> size_dist(1.0f, 10.0f);
+        std::vector<BoundingBox> probe(N_PROBE);
+        for (uint32_t i = 0; i < N_PROBE; ++i) {
+            float x = coord_dist(rng);
+            float y = coord_dist(rng);
+            float w = size_dist(rng);
+            float h = size_dist(rng);
+            probe[i] = BoundingBox{x, y, x + w, y + h};
+        }
+
+        auto expected = cpu_oracle(build, probe);
+        assert(expected.size() == static_cast<size_t>(N_BUILD) * N_PROBE);
+
+        MetalSpatialIndex index(device);
+        index.set_index_type(IndexType::SpatialHash);
+        index.push_build(reinterpret_cast<const float*>(build.data()), N_BUILD);
+        index.finish_building();
+
+        std::vector<uint32_t> out_build, out_probe;
+        bool ok = index.probe(reinterpret_cast<const float*>(probe.data()), N_PROBE, out_build, out_probe);
+        assert(ok);
+        verify_matches(out_build, out_probe, expected);
+        std::cout << "  20k Full-Extent Build Boxes vs Probes: PASS (" << out_build.size() << " matches, verified vs CPU oracle)\n";
+    }
+
+    // Sub-test 8.2: Heavily clustered data (95% of 20k boxes in 1% of extent)
+    {
+        const uint32_t N_BUILD = 20000;
+        const uint32_t N_PROBE = 200;
+        std::vector<BoundingBox> build(N_BUILD);
+        std::mt19937 rng(1402);
+        std::uniform_real_distribution<float> cluster_dist(0.0f, 100.0f); // 1% area of 1000x1000
+        std::uniform_real_distribution<float> world_dist(0.0f, 1000.0f);
+        std::uniform_real_distribution<float> size_dist(0.1f, 2.0f);
+
+        uint32_t n_cluster = static_cast<uint32_t>(N_BUILD * 0.95);
+        for (uint32_t i = 0; i < n_cluster; ++i) {
+            float x = cluster_dist(rng);
+            float y = cluster_dist(rng);
+            build[i] = BoundingBox{x, y, x + size_dist(rng), y + size_dist(rng)};
+        }
+        for (uint32_t i = n_cluster; i < N_BUILD; ++i) {
+            float x = world_dist(rng);
+            float y = world_dist(rng);
+            build[i] = BoundingBox{x, y, x + size_dist(rng), y + size_dist(rng)};
+        }
+
+        std::vector<BoundingBox> probe(N_PROBE);
+        for (uint32_t i = 0; i < N_PROBE; ++i) {
+            // Half inside cluster, half outside
+            float x = (i % 2 == 0) ? cluster_dist(rng) : world_dist(rng);
+            float y = (i % 2 == 0) ? cluster_dist(rng) : world_dist(rng);
+            probe[i] = BoundingBox{x, y, x + size_dist(rng), y + size_dist(rng)};
+        }
+
+        auto expected = cpu_oracle(build, probe);
+
+        MetalSpatialIndex index(device);
+        index.set_index_type(IndexType::SpatialHash);
+        index.push_build(reinterpret_cast<const float*>(build.data()), N_BUILD);
+        index.finish_building();
+
+        std::vector<uint32_t> out_build, out_probe;
+        bool ok = index.probe(reinterpret_cast<const float*>(probe.data()), N_PROBE, out_build, out_probe);
+        assert(ok);
+        verify_matches(out_build, out_probe, expected);
+        std::cout << "  95% Clustered in 1% Extent: PASS (" << out_build.size() << " matches, verified vs CPU oracle)\n";
+    }
+
+    // Sub-test 8.3: One probe box covering everything
+    {
+        const uint32_t N_BUILD = 10000;
+        std::vector<BoundingBox> build(N_BUILD);
+        std::mt19937 rng(1403);
+        std::uniform_real_distribution<float> world_dist(0.0f, 1000.0f);
+        std::uniform_real_distribution<float> size_dist(0.5f, 5.0f);
+        for (uint32_t i = 0; i < N_BUILD; ++i) {
+            float x = world_dist(rng);
+            float y = world_dist(rng);
+            build[i] = BoundingBox{x, y, x + size_dist(rng), y + size_dist(rng)};
+        }
+
+        std::vector<BoundingBox> probe = {
+            BoundingBox{-50.0f, -50.0f, 1050.0f, 1050.0f} // Covers entire extent
+        };
+
+        auto expected = cpu_oracle(build, probe);
+        assert(expected.size() == N_BUILD);
+
+        MetalSpatialIndex index(device);
+        index.set_index_type(IndexType::SpatialHash);
+        index.push_build(reinterpret_cast<const float*>(build.data()), N_BUILD);
+        index.finish_building();
+
+        std::vector<uint32_t> out_build, out_probe;
+        bool ok = index.probe(reinterpret_cast<const float*>(probe.data()), 1, out_build, out_probe);
+        assert(ok);
+        verify_matches(out_build, out_probe, expected);
+        std::cout << "  One Probe Box Covering Everything: PASS (" << out_build.size() << " matches, verified vs CPU oracle)\n";
+    }
+}
+
 int main() {
     @autoreleasepool {
         std::cout << "========================================================\n";
@@ -631,6 +782,7 @@ int main() {
         test_rt_hash_parity(device);
         test_nan_inf_cases(device);
         test_error_handling(device);
+        test_hierarchical_grid_adversarial(device);
 
         auto suite_t1 = std::chrono::high_resolution_clock::now();
         double total_suite_s = std::chrono::duration<double>(suite_t1 - suite_t0).count();
