@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#![cfg(target_os = "macos")]
+
 use sedona_metalspatial::MetalSpatialIndex;
 use std::collections::BTreeSet;
 

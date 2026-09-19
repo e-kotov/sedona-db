@@ -284,6 +284,10 @@ impl MetalSpatialIndex {
         Err(MetalSpatialError::PlatformNotSupported)
     }
 
+    pub fn last_error(&self) -> String {
+        "Metal is not supported on this platform".to_string()
+    }
+
     pub fn probe(&self, _rects: &[[f32; 4]]) -> Result<(Vec<u32>, Vec<u32>), MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
     }

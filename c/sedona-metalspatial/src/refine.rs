@@ -41,7 +41,9 @@ pub enum ContainerSide {
 pub struct MetalSpatialRefiner {
     #[cfg(target_os = "macos")]
     raw: *mut c_void,
+    #[cfg(target_os = "macos")]
     device_name: String,
+    #[cfg(target_os = "macos")]
     num_build_polygons: usize,
 }
 
@@ -364,6 +366,12 @@ impl Drop for MetalSpatialRefiner {
 #[cfg(not(target_os = "macos"))]
 impl MetalSpatialRefiner {
     pub fn try_new() -> Result<Self, MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn try_new_with_mode(_bound_mode: i32) -> Result<Self, MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
     }
 

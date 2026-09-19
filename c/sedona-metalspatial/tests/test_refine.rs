@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#![cfg(target_os = "macos")]
+
 use arrow_array::{ArrayRef, BinaryArray};
 use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use robust::Coord;

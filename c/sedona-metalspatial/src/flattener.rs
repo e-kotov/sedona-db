@@ -120,6 +120,7 @@ pub fn decompose_f64(v: f64) -> (f32, f32) {
 /// eta_poly = nextafter(2*u*R_poly + 2^-48*||o||_inf, +inf)
 /// where u = 2^-24, 2^-48 is decomposition roundoff bound.
 #[inline(always)]
+#[allow(clippy::excessive_precision)]
 pub fn compute_eta_poly(ox: f64, oy: f64, r_poly: f64) -> f32 {
     let u = 5.9604644775390625e-8f64; // 2^-24
     let two_neg_48 = 3.552713678800501e-15f64; // 2^-48
@@ -135,7 +136,7 @@ pub fn compute_eta_poly(ox: f64, oy: f64, r_poly: f64) -> f32 {
 }
 
 /// Helper to extract WKB bytes slice from an Arrow ArrayRef.
-pub fn extract_wkb_slice<'a>(array: &'a ArrayRef, row: usize) -> Option<&'a [u8]> {
+pub fn extract_wkb_slice(array: &ArrayRef, row: usize) -> Option<&[u8]> {
     if array.is_null(row) {
         return None;
     }
@@ -623,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::excessive_precision)]
     fn test_eta_poly_rounded_up() {
         let ox = 500000.0f64;
         let oy = 600000.0f64;
