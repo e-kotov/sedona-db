@@ -25,8 +25,15 @@ struct GridParams {
     uint  max_results;
 };
 
+inline bool is_valid_box(BoundingBox b) {
+    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
+             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
+
 // Check if two 2D boxes intersect (inclusive boundaries)
 inline bool boxes_intersect(BoundingBox a, BoundingBox b) {
+    if (!is_valid_box(a) || !is_valid_box(b)) return false;
     return !(a.xmax < b.xmin || a.xmin > b.xmax || a.ymax < b.ymin || a.ymin > b.ymax);
 }
 
@@ -50,6 +57,8 @@ kernel void count_cell_entries(
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
+    if (!is_valid_box(b)) return;
+
     int min_cx, max_cx, min_cy, max_cy;
     get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
 
@@ -72,6 +81,8 @@ kernel void populate_cells(
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
+    if (!is_valid_box(b)) return;
+
     int min_cx, max_cx, min_cy, max_cy;
     get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
 
@@ -95,8 +106,9 @@ kernel void probe_grid(
     constant GridParams&      p            [[buffer(6)]],
     uint                      tid          [[thread_position_in_grid]])
 {
-    if (tid >= p.num_probe) return;
+    if (tid >= p.num_probe || p.num_build == 0) return;
     BoundingBox probe = probe_boxes[tid];
+    if (!is_valid_box(probe)) return;
 
     float max_grid_x = p.min_x + p.cell_w * float(p.grid_dim_x);
     float max_grid_y = p.min_y + p.cell_h * float(p.grid_dim_y);

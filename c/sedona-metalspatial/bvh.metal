@@ -23,6 +23,12 @@ struct MatchPair {
 // Exact geometric validation is performed to guarantee 100% precision.
 // =====================================================================
 
+inline bool is_valid_box(BoundingBox b) {
+    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
+             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
+
 kernel void rt_probe_points(
     primitive_acceleration_structure accel        [[buffer(0)]],
     device const BoundingBox*        build_boxes  [[buffer(1)]],
@@ -36,6 +42,8 @@ kernel void rt_probe_points(
     if (tid >= num_probes) return;
 
     BoundingBox probe = probe_boxes[tid];
+    if (!is_valid_box(probe)) return;
+
     float px = probe.xmin;
     float py = probe.ymin;
 
@@ -53,7 +61,7 @@ kernel void rt_probe_points(
             uint build_id = q.get_candidate_primitive_id();
             BoundingBox b = build_boxes[build_id];
             // Exact geometric inclusion check (inclusive boundaries matching SedonaDB)
-            if (px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
+            if (is_valid_box(b) && px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
                 uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
                 if (slot < max_results) {
                     output_pairs[slot] = MatchPair{build_id, tid};

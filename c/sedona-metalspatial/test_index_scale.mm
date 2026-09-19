@@ -489,6 +489,102 @@ void test_rt_hash_parity(id<MTLDevice> device) {
     std::cout << "  Parity between Hardware RT and Spatial Hash: 100% IDENTICAL (" << rt_set.size() << " pairs)\n";
 }
 
+// =====================================================================
+// Test 6: Robust NaN, Inf & Inverted Bounds Handling (Item 1.2)
+// =====================================================================
+void test_nan_inf_cases(id<MTLDevice> device) {
+    std::cout << "\n--- Test 6: NaN, Inf & Inverted Bounds Handling ---\n";
+
+    float qnan = std::numeric_limits<float>::quiet_NaN();
+    float pinf = std::numeric_limits<float>::infinity();
+    float ninf = -std::numeric_limits<float>::infinity();
+
+    // 11 build boxes: valid at index 0 and 10; various invalid boxes in 1..9
+    std::vector<BoundingBox> build = {
+        {0.0f, 0.0f, 10.0f, 10.0f},   // 0: valid
+        {qnan, 0.0f, 10.0f, 10.0f},   // 1: NaN xmin
+        {0.0f, qnan, 10.0f, 10.0f},   // 2: NaN ymin
+        {0.0f, 0.0f, qnan, 10.0f},   // 3: NaN xmax
+        {0.0f, 0.0f, 10.0f, qnan},   // 4: NaN ymax
+        {pinf, 0.0f, 10.0f, 10.0f},   // 5: +Inf xmin
+        {ninf, 0.0f, 10.0f, 10.0f},   // 6: -Inf xmin
+        {0.0f, 0.0f, pinf, 10.0f},   // 7: +Inf xmax
+        {10.0f, 0.0f, 5.0f, 10.0f},   // 8: inverted xmin > xmax
+        {0.0f, 10.0f, 10.0f, 5.0f},   // 9: inverted ymin > ymax
+        {20.0f, 20.0f, 30.0f, 30.0f}  // 10: valid
+    };
+
+    // 5 probe boxes (points): valid at index 0 and 3; invalid at 1, 2, 4
+    std::vector<BoundingBox> probe = {
+        {5.0f, 5.0f, 5.0f, 5.0f},       // 0: inside build[0]
+        {qnan, 5.0f, qnan, 5.0f},       // 1: NaN probe
+        {5.0f, pinf, 5.0f, pinf},       // 2: Inf probe
+        {25.0f, 25.0f, 25.0f, 25.0f},   // 3: inside build[10]
+        {15.0f, 0.0f, 5.0f, 0.0f}       // 4: inverted probe xmin > xmax
+    };
+
+    std::vector<IndexType> engines = {IndexType::SpatialHash};
+    if ([device supportsRaytracing]) {
+        engines.push_back(IndexType::HardwareRT);
+    }
+
+    for (auto engine : engines) {
+        MetalSpatialIndex index(device);
+        index.set_index_type(engine);
+        index.push_build(reinterpret_cast<const float*>(build.data()), static_cast<uint32_t>(build.size()));
+        index.finish_building();
+
+        std::vector<uint32_t> out_build, out_probe;
+        index.probe(reinterpret_cast<const float*>(probe.data()), static_cast<uint32_t>(probe.size()), out_build, out_probe);
+
+        // Positional index integrity check:
+        // Must contain ONLY matches (build 0, probe 0) and (build 10, probe 3).
+        assert(out_build.size() == 2);
+        assert(out_probe.size() == 2);
+
+        bool found_0_0 = false;
+        bool found_10_3 = false;
+        for (size_t i = 0; i < out_build.size(); ++i) {
+            uint32_t b = out_build[i];
+            uint32_t p = out_probe[i];
+            assert(b == 0 || b == 10);
+            assert(p == 0 || p == 3);
+            if (b == 0 && p == 0) found_0_0 = true;
+            if (b == 10 && p == 3) found_10_3 = true;
+        }
+        assert(found_0_0 && found_10_3);
+
+        // Sub-test: All build boxes are NaN/Inf -> graceful empty result
+        std::vector<BoundingBox> all_nan_build = {
+            {qnan, qnan, qnan, qnan},
+            {pinf, pinf, pinf, pinf}
+        };
+        MetalSpatialIndex empty_build_index(device);
+        empty_build_index.set_index_type(engine);
+        empty_build_index.push_build(reinterpret_cast<const float*>(all_nan_build.data()), 2);
+        empty_build_index.finish_building();
+
+        out_build.clear();
+        out_probe.clear();
+        empty_build_index.probe(reinterpret_cast<const float*>(probe.data()), static_cast<uint32_t>(probe.size()), out_build, out_probe);
+        assert(out_build.empty());
+        assert(out_probe.empty());
+
+        // Sub-test: All probe boxes are NaN/Inf -> graceful empty result
+        std::vector<BoundingBox> all_nan_probe = {
+            {qnan, qnan, qnan, qnan},
+            {pinf, pinf, pinf, pinf}
+        };
+        out_build.clear();
+        out_probe.clear();
+        index.probe(reinterpret_cast<const float*>(all_nan_probe.data()), 2, out_build, out_probe);
+        assert(out_build.empty());
+        assert(out_probe.empty());
+    }
+
+    std::cout << "  NaN, Inf & Inverted Bounds Handling: PASS (all engines, positional integrity verified)\n";
+}
+
 int main() {
     @autoreleasepool {
         std::cout << "========================================================\n";
@@ -512,6 +608,7 @@ int main() {
         test_spatial_hash_scale(device);
         test_edge_cases(device);
         test_rt_hash_parity(device);
+        test_nan_inf_cases(device);
 
         auto suite_t1 = std::chrono::high_resolution_clock::now();
         double total_suite_s = std::chrono::duration<double>(suite_t1 - suite_t0).count();

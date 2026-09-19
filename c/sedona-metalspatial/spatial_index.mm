@@ -28,6 +28,12 @@ struct MatchPair {
     uint probe_idx;
 };
 
+inline bool is_valid_box(BoundingBox b) {
+    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
+             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
+
 kernel void rt_probe_points(
     primitive_acceleration_structure accel        [[buffer(0)]],
     device const BoundingBox*        build_boxes  [[buffer(1)]],
@@ -41,6 +47,8 @@ kernel void rt_probe_points(
     if (tid >= num_probes) return;
 
     BoundingBox probe = probe_boxes[tid];
+    if (!is_valid_box(probe)) return;
+
     float px = probe.xmin;
     float py = probe.ymin;
 
@@ -55,7 +63,7 @@ kernel void rt_probe_points(
         if (q.get_candidate_intersection_type() == intersection_type::bounding_box) {
             uint build_id = q.get_candidate_primitive_id();
             BoundingBox b = build_boxes[build_id];
-            if (px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
+            if (is_valid_box(b) && px >= b.xmin && px <= b.xmax && py >= b.ymin && py <= b.ymax) {
                 uint slot = atomic_fetch_add_explicit(match_count, 1, memory_order_relaxed);
                 if (slot < max_results) {
                     output_pairs[slot] = MatchPair{build_id, tid};
@@ -95,7 +103,14 @@ struct GridParams {
     uint  max_results;
 };
 
+inline bool is_valid_box(BoundingBox b) {
+    return !(isnan(b.xmin) || isnan(b.ymin) || isnan(b.xmax) || isnan(b.ymax) ||
+             isinf(b.xmin) || isinf(b.ymin) || isinf(b.xmax) || isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
+
 inline bool boxes_intersect(BoundingBox a, BoundingBox b) {
+    if (!is_valid_box(a) || !is_valid_box(b)) return false;
     return !(a.xmax < b.xmin || a.xmin > b.xmax || a.ymax < b.ymin || a.ymin > b.ymax);
 }
 
@@ -117,6 +132,8 @@ kernel void count_cell_entries(
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
+    if (!is_valid_box(b)) return;
+
     int min_cx, max_cx, min_cy, max_cy;
     get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
 
@@ -138,6 +155,8 @@ kernel void populate_cells(
 {
     if (tid >= p.num_build) return;
     BoundingBox b = boxes[tid];
+    if (!is_valid_box(b)) return;
+
     int min_cx, max_cx, min_cy, max_cy;
     get_cell_range(b, p, min_cx, max_cx, min_cy, max_cy);
 
@@ -160,8 +179,9 @@ kernel void probe_grid(
     constant GridParams&      p            [[buffer(6)]],
     uint                      tid          [[thread_position_in_grid]])
 {
-    if (tid >= p.num_probe) return;
+    if (tid >= p.num_probe || p.num_build == 0) return;
     BoundingBox probe = probe_boxes[tid];
+    if (!is_valid_box(probe)) return;
 
     float max_grid_x = p.min_x + p.cell_w * float(p.grid_dim_x);
     float max_grid_y = p.min_y + p.cell_h * float(p.grid_dim_y);
@@ -197,6 +217,12 @@ kernel void probe_grid(
     }
 }
 )";
+
+inline bool is_valid_box(const BoundingBox& b) {
+    return !(std::isnan(b.xmin) || std::isnan(b.ymin) || std::isnan(b.xmax) || std::isnan(b.ymax) ||
+             std::isinf(b.xmin) || std::isinf(b.ymin) || std::isinf(b.xmax) || std::isinf(b.ymax) ||
+             b.xmin > b.xmax || b.ymin > b.ymax);
+}
 
 struct GridParamsInternal {
     float min_x;
@@ -300,6 +326,12 @@ struct MetalSpatialIndex::Impl {
             // Expand conservative bounds to prevent grazing-ray precision misses on boundaries across any coordinate scale
             for (uint32_t i = 0; i < n; ++i) {
                 const auto& b = build_boxes[i];
+                if (!is_valid_box(b)) {
+                    // Park NaN/Inf/inverted rows at a dummy bounding box outside ray range (z in [10, 11])
+                    mtl_boxes[i].min = MTLPackedFloat3Make(0.0f, 0.0f, 10.0f);
+                    mtl_boxes[i].max = MTLPackedFloat3Make(0.0f, 0.0f, 11.0f);
+                    continue;
+                }
                 float dx = std::max(1e-4f, (b.xmax - b.xmin) * 1e-4f + std::abs(b.xmax) * 1e-6f);
                 float dy = std::max(1e-4f, (b.ymax - b.ymin) * 1e-4f + std::abs(b.ymax) * 1e-6f);
                 mtl_boxes[i].min = MTLPackedFloat3Make(b.xmin - dx, b.ymin - dy, -0.5f);
@@ -343,15 +375,40 @@ struct MetalSpatialIndex::Impl {
             uint32_t n = static_cast<uint32_t>(build_boxes.size());
             if (n == 0) return;
             float min_x = 1e30f, min_y = 1e30f, max_x = -1e30f, max_y = -1e30f;
+            uint32_t valid_count = 0;
             for (uint32_t i = 0; i < n; ++i) {
-                min_x = std::min(min_x, build_boxes[i].xmin);
-                min_y = std::min(min_y, build_boxes[i].ymin);
-                max_x = std::max(max_x, build_boxes[i].xmax);
-                max_y = std::max(max_y, build_boxes[i].ymax);
+                if (is_valid_box(build_boxes[i])) {
+                    min_x = std::min(min_x, build_boxes[i].xmin);
+                    min_y = std::min(min_y, build_boxes[i].ymin);
+                    max_x = std::max(max_x, build_boxes[i].xmax);
+                    max_y = std::max(max_y, build_boxes[i].ymax);
+                    valid_count++;
+                }
+            }
+
+            if (valid_count == 0) {
+                // All boxes are NaN/Inf/invalid. Handle gracefully: empty index, 0 matches.
+                grid_params.min_x = 0.0f;
+                grid_params.min_y = 0.0f;
+                grid_params.cell_w = 1.0f;
+                grid_params.cell_h = 1.0f;
+                grid_params.grid_dim_x = 1;
+                grid_params.grid_dim_y = 1;
+                grid_params.num_build = 0;
+                grid_params.num_probe = 0;
+                grid_params.max_results = 0;
+
+                std::vector<uint32_t> offsets(2, 0);
+                buf_grid_offsets = [device newBufferWithBytes:offsets.data()
+                                                       length:sizeof(uint32_t) * 2
+                                                      options:MTLResourceStorageModeShared];
+                buf_grid_entries = [device newBufferWithLength:sizeof(uint32_t)
+                                                       options:MTLResourceStorageModeShared];
+                return;
             }
 
             // Grid resolution: heuristically balance cell occupancy
-            uint32_t grid_dim = static_cast<uint32_t>(std::clamp(static_cast<float>(std::sqrt(n) * 1.2), 32.0f, 512.0f));
+            uint32_t grid_dim = static_cast<uint32_t>(std::clamp(static_cast<float>(std::sqrt(valid_count) * 1.2), 32.0f, 512.0f));
             uint32_t num_cells = grid_dim * grid_dim;
 
             float span_x = std::max(max_x - min_x, 1e-4f);
@@ -521,6 +578,7 @@ void MetalSpatialIndex::probe(const float* rects_flat, uint32_t count,
         // Detect if all probe geometries are points (xmin == xmax && ymin == ymax)
         bool is_points = true;
         for (uint32_t i = 0; i < count; ++i) {
+            if (!is_valid_box(probe_boxes[i])) continue;
             if (probe_boxes[i].xmin != probe_boxes[i].xmax || probe_boxes[i].ymin != probe_boxes[i].ymax) {
                 is_points = false;
                 break;
