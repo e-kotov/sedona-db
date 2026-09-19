@@ -6026,6 +6026,7 @@ dependencies = [
  "arrow-schema",
  "byteorder",
  "cc",
+ "geo-traits",
  "robust",
  "thiserror 2.0.20",
  "wkb",

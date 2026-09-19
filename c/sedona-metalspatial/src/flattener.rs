@@ -16,7 +16,9 @@
 // under the License.
 
 use arrow_array::{Array, ArrayRef, BinaryArray, BinaryViewArray, LargeBinaryArray};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use geo_traits::{
+    CoordTrait, GeometryTrait, LineStringTrait, MultiPolygonTrait, PointTrait, PolygonTrait,
+};
 
 pub const STATE_OUTSIDE: u32 = 0;
 pub const STATE_INSIDE: u32 = 1;
@@ -149,220 +151,102 @@ pub fn extract_wkb_slice<'a>(array: &'a ArrayRef, row: usize) -> Option<&'a [u8]
 }
 
 /// Internal representation of parsed raw coordinates before flattening.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawRing {
     pub vertices: Vec<(f64, f64)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawPart {
     pub rings: Vec<RawRing>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawPolygon {
     pub parts: Vec<RawPart>,
 }
 
-/// Parse WKB point into (f64, f64).
-/// Supports both little-endian and big-endian, and EWKB SRID flag.
+/// Parse WKB point into (f64, f64) using SedonaDB's standard wkb crate.
+/// Transparently handles 2D, 3D (Z), Measure (M), ZM, EWKB SRID, and endianness.
 pub fn parse_wkb_point(buf: &[u8]) -> Option<(f64, f64)> {
-    if buf.len() < 5 {
-        return None;
-    }
-    let is_le = match buf[0] {
-        1 => true,
-        0 => false,
-        _ => return None,
-    };
-    let raw_type = if is_le {
-        LittleEndian::read_u32(&buf[1..5])
-    } else {
-        BigEndian::read_u32(&buf[1..5])
-    };
-
-    let has_srid = (raw_type & 0x20000000) != 0;
-    let base_type = raw_type & 0x1FFFFFFF;
-
-    // Type 1 is Point, Type 1001 is PointZ, Type 2001 is PointM, Type 3001 is PointZM
-    if base_type != 1 && base_type != 1001 && base_type != 2001 && base_type != 3001 {
-        return None;
-    }
-
-    let coord_offset = if has_srid { 9 } else { 5 };
-    if buf.len() < coord_offset + 16 {
-        return None;
-    }
-
-    let x = if is_le {
-        LittleEndian::read_f64(&buf[coord_offset..coord_offset + 8])
-    } else {
-        BigEndian::read_f64(&buf[coord_offset..coord_offset + 8])
-    };
-    let y = if is_le {
-        LittleEndian::read_f64(&buf[coord_offset + 8..coord_offset + 16])
-    } else {
-        BigEndian::read_f64(&buf[coord_offset + 8..coord_offset + 16])
-    };
-
-    if x.is_nan() || y.is_nan() || x.is_infinite() || y.is_infinite() {
-        return None;
-    }
-
-    Some((x, y))
-}
-
-/// Parse WKB Polygon or MultiPolygon into RawPolygon.
-pub fn parse_wkb_polygon(buf: &[u8]) -> Option<RawPolygon> {
-    if buf.len() < 5 {
-        return None;
-    }
-    let mut cursor = 0;
-    let is_le = match buf[cursor] {
-        1 => true,
-        0 => false,
-        _ => return None,
-    };
-    cursor += 1;
-
-    let raw_type = if is_le {
-        LittleEndian::read_u32(&buf[cursor..cursor + 4])
-    } else {
-        BigEndian::read_u32(&buf[cursor..cursor + 4])
-    };
-    cursor += 4;
-
-    let has_srid = (raw_type & 0x20000000) != 0;
-    if has_srid {
-        if buf.len() < cursor + 4 {
-            return None;
-        }
-        cursor += 4;
-    }
-
-    let base_type = raw_type & 0x1FFFFFFF;
-
-    if base_type == 3 || base_type == 1003 || base_type == 2003 || base_type == 3003 {
-        // Single Polygon
-        let stride = match base_type {
-            1003 | 2003 => 24, // X, Y, Z or M
-            3003 => 32,        // X, Y, Z, M
-            _ => 16,           // X, Y
-        };
-        let part = parse_wkb_polygon_part(buf, &mut cursor, is_le, stride)?;
-        Some(RawPolygon { parts: vec![part] })
-    } else if base_type == 6 || base_type == 1006 || base_type == 2006 || base_type == 3006 {
-        // MultiPolygon
-        if buf.len() < cursor + 4 {
-            return None;
-        }
-        let num_polys = if is_le {
-            LittleEndian::read_u32(&buf[cursor..cursor + 4])
-        } else {
-            BigEndian::read_u32(&buf[cursor..cursor + 4])
-        } as usize;
-        cursor += 4;
-
-        let mut parts = Vec::with_capacity(num_polys);
-        for _ in 0..num_polys {
-            if buf.len() < cursor + 5 {
-                return None;
-            }
-            let p_le = match buf[cursor] {
-                1 => true,
-                0 => false,
-                _ => return None,
-            };
-            cursor += 1;
-            let p_type = if p_le {
-                LittleEndian::read_u32(&buf[cursor..cursor + 4])
-            } else {
-                BigEndian::read_u32(&buf[cursor..cursor + 4])
-            };
-            cursor += 4;
-            let p_base = p_type & 0x1FFFFFFF;
-            if p_base != 3 && p_base != 1003 && p_base != 2003 && p_base != 3003 {
-                return None;
-            }
-            let stride = match p_base {
-                1003 | 2003 => 24,
-                3003 => 32,
-                _ => 16,
-            };
-            let part = parse_wkb_polygon_part(buf, &mut cursor, p_le, stride)?;
-            parts.push(part);
-        }
-        Some(RawPolygon { parts })
-    } else {
-        None
-    }
-}
-
-fn parse_wkb_polygon_part(
-    buf: &[u8],
-    cursor: &mut usize,
-    is_le: bool,
-    stride: usize,
-) -> Option<RawPart> {
-    if buf.len() < *cursor + 4 {
-        return None;
-    }
-    let num_rings = if is_le {
-        LittleEndian::read_u32(&buf[*cursor..*cursor + 4])
-    } else {
-        BigEndian::read_u32(&buf[*cursor..*cursor + 4])
-    } as usize;
-    *cursor += 4;
-
-    let mut rings = Vec::with_capacity(num_rings);
-    for _ in 0..num_rings {
-        if buf.len() < *cursor + 4 {
-            return None;
-        }
-        let num_points = if is_le {
-            LittleEndian::read_u32(&buf[*cursor..*cursor + 4])
-        } else {
-            BigEndian::read_u32(&buf[*cursor..*cursor + 4])
-        } as usize;
-        *cursor += 4;
-
-        if buf.len() < *cursor + num_points * stride {
-            return None;
-        }
-
-        let mut vertices = Vec::with_capacity(num_points);
-        for _ in 0..num_points {
-            let x = if is_le {
-                LittleEndian::read_f64(&buf[*cursor..*cursor + 8])
-            } else {
-                BigEndian::read_f64(&buf[*cursor..*cursor + 8])
-            };
-            let y = if is_le {
-                LittleEndian::read_f64(&buf[*cursor + 8..*cursor + 16])
-            } else {
-                BigEndian::read_f64(&buf[*cursor + 8..*cursor + 16])
-            };
-            *cursor += stride;
-
+    let wkb_geom = wkb::reader::read_wkb(buf).ok()?;
+    match wkb_geom.as_type() {
+        geo_traits::GeometryType::Point(pt) => {
+            let coord = pt.coord()?;
+            let x = coord.x();
+            let y = coord.y();
             if x.is_nan() || y.is_nan() || x.is_infinite() || y.is_infinite() {
-                return None;
+                None
+            } else {
+                Some((x, y))
             }
-            vertices.push((x, y));
         }
+        _ => None,
+    }
+}
 
-        // If closed, retain vertices without duplicate closing vertex if num_points > 1
-        if vertices.len() > 1 && vertices.first() == vertices.last() {
-            vertices.pop();
+/// Parse WKB Polygon or MultiPolygon using SedonaDB's standard wkb crate.
+/// Transparently handles EWKB Z/M flags, SRID, ISO Z, and endianness.
+pub fn parse_wkb_polygon(buf: &[u8]) -> Option<RawPolygon> {
+    let wkb_geom = wkb::reader::read_wkb(buf).ok()?;
+    match wkb_geom.as_type() {
+        geo_traits::GeometryType::Polygon(poly) => {
+            let part = parse_polygon_trait(&poly)?;
+            Some(RawPolygon { parts: vec![part] })
         }
+        geo_traits::GeometryType::MultiPolygon(mp) => {
+            let mut parts = Vec::new();
+            for poly in mp.polygons() {
+                let part = parse_polygon_trait(&poly)?;
+                parts.push(part);
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(RawPolygon { parts })
+            }
+        }
+        _ => None,
+    }
+}
 
-        if vertices.len() < 3 {
+fn parse_polygon_trait(poly: &impl PolygonTrait<T = f64>) -> Option<RawPart> {
+    let ext_ring = poly.exterior()?;
+    let mut rings = Vec::new();
+    let ext_parsed = parse_ring_trait(&ext_ring)?;
+    rings.push(ext_parsed);
+
+    for hole in poly.interiors() {
+        let hole_parsed = parse_ring_trait(&hole)?;
+        rings.push(hole_parsed);
+    }
+    Some(RawPart { rings })
+}
+
+fn parse_ring_trait(ring: &impl LineStringTrait<T = f64>) -> Option<RawRing> {
+    let mut vertices = Vec::new();
+    for coord in ring.coords() {
+        let x = coord.x();
+        let y = coord.y();
+        if x.is_nan() || y.is_nan() || x.is_infinite() || y.is_infinite() {
             return None;
         }
-
-        rings.push(RawRing { vertices });
+        vertices.push((x, y));
     }
 
-    Some(RawPart { rings })
+    // Deduplicate consecutive identical vertices
+    vertices.dedup();
+
+    // Deduplicate closing vertex if identical to first vertex
+    if vertices.len() > 1 && vertices.first() == vertices.last() {
+        vertices.pop();
+    }
+
+    if vertices.len() < 3 {
+        return None;
+    }
+
+    Some(RawRing { vertices })
 }
 
 /// Flattens a batch of build polygon geometries into GPU-ready buffers.
@@ -529,28 +413,179 @@ pub fn flatten_probe_points(array: &ArrayRef) -> Vec<DecomposedPoint> {
 mod tests {
     use super::*;
     use arrow_array::BinaryArray;
+    use byteorder::{BigEndian, ByteOrder, LittleEndian};
     use std::sync::Arc;
 
     fn make_point_wkb(x: f64, y: f64) -> Vec<u8> {
         let mut buf = vec![1u8]; // Little endian
-        buf.extend_from_slice(&1u32.to_le_bytes()); // Point
-        buf.extend_from_slice(&x.to_le_bytes());
-        buf.extend_from_slice(&y.to_le_bytes());
+        let mut type_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut type_buf, 1); // Point
+        buf.extend_from_slice(&type_buf);
+        let mut coord_buf = [0u8; 8];
+        LittleEndian::write_f64(&mut coord_buf, x);
+        buf.extend_from_slice(&coord_buf);
+        LittleEndian::write_f64(&mut coord_buf, y);
+        buf.extend_from_slice(&coord_buf);
         buf
     }
 
     fn make_poly_wkb(rings: &[&[(f64, f64)]]) -> Vec<u8> {
         let mut buf = vec![1u8]; // Little endian
-        buf.extend_from_slice(&3u32.to_le_bytes()); // Polygon
-        buf.extend_from_slice(&(rings.len() as u32).to_le_bytes());
+        let mut u32_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut u32_buf, 3); // Polygon
+        buf.extend_from_slice(&u32_buf);
+        LittleEndian::write_u32(&mut u32_buf, rings.len() as u32);
+        buf.extend_from_slice(&u32_buf);
         for ring in rings {
-            buf.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            LittleEndian::write_u32(&mut u32_buf, ring.len() as u32);
+            buf.extend_from_slice(&u32_buf);
             for &(x, y) in *ring {
-                buf.extend_from_slice(&x.to_le_bytes());
-                buf.extend_from_slice(&y.to_le_bytes());
+                let mut f64_buf = [0u8; 8];
+                LittleEndian::write_f64(&mut f64_buf, x);
+                buf.extend_from_slice(&f64_buf);
+                LittleEndian::write_f64(&mut f64_buf, y);
+                buf.extend_from_slice(&f64_buf);
             }
         }
         buf
+    }
+
+    fn make_ewkb_polygon(
+        rings: &[&[(f64, f64)]],
+        with_srid: bool,
+        with_z: bool,
+        with_m: bool,
+        is_be: bool,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(if is_be { 0u8 } else { 1u8 });
+
+        let mut geom_type: u32 = 3;
+        if with_z {
+            geom_type |= 0x80000000;
+        }
+        if with_m {
+            geom_type |= 0x40000000;
+        }
+        if with_srid {
+            geom_type |= 0x20000000;
+        }
+
+        let mut u32_buf = [0u8; 4];
+        if is_be {
+            BigEndian::write_u32(&mut u32_buf, geom_type);
+        } else {
+            LittleEndian::write_u32(&mut u32_buf, geom_type);
+        }
+        buf.extend_from_slice(&u32_buf);
+
+        if with_srid {
+            if is_be {
+                BigEndian::write_u32(&mut u32_buf, 4326);
+            } else {
+                LittleEndian::write_u32(&mut u32_buf, 4326);
+            }
+            buf.extend_from_slice(&u32_buf);
+        }
+
+        if is_be {
+            BigEndian::write_u32(&mut u32_buf, rings.len() as u32);
+        } else {
+            LittleEndian::write_u32(&mut u32_buf, rings.len() as u32);
+        }
+        buf.extend_from_slice(&u32_buf);
+
+        for ring in rings {
+            if is_be {
+                BigEndian::write_u32(&mut u32_buf, ring.len() as u32);
+            } else {
+                LittleEndian::write_u32(&mut u32_buf, ring.len() as u32);
+            }
+            buf.extend_from_slice(&u32_buf);
+
+            for &(x, y) in *ring {
+                let mut f64_buf = [0u8; 8];
+                // X
+                if is_be { BigEndian::write_f64(&mut f64_buf, x); } else { LittleEndian::write_f64(&mut f64_buf, x); }
+                buf.extend_from_slice(&f64_buf);
+                // Y
+                if is_be { BigEndian::write_f64(&mut f64_buf, y); } else { LittleEndian::write_f64(&mut f64_buf, y); }
+                buf.extend_from_slice(&f64_buf);
+                // Z if present
+                if with_z {
+                    if is_be { BigEndian::write_f64(&mut f64_buf, 42.0); } else { LittleEndian::write_f64(&mut f64_buf, 42.0); }
+                    buf.extend_from_slice(&f64_buf);
+                }
+                // M if present
+                if with_m {
+                    if is_be { BigEndian::write_f64(&mut f64_buf, 100.0); } else { LittleEndian::write_f64(&mut f64_buf, 100.0); }
+                    buf.extend_from_slice(&f64_buf);
+                }
+            }
+        }
+        buf
+    }
+
+    fn make_iso_z_polygon(rings: &[&[(f64, f64)]]) -> Vec<u8> {
+        let mut buf = vec![1u8]; // Little endian
+        let mut u32_buf = [0u8; 4];
+        LittleEndian::write_u32(&mut u32_buf, 1003); // ISO PolygonZ
+        buf.extend_from_slice(&u32_buf);
+        LittleEndian::write_u32(&mut u32_buf, rings.len() as u32);
+        buf.extend_from_slice(&u32_buf);
+        for ring in rings {
+            LittleEndian::write_u32(&mut u32_buf, ring.len() as u32);
+            buf.extend_from_slice(&u32_buf);
+            for &(x, y) in *ring {
+                let mut f64_buf = [0u8; 8];
+                LittleEndian::write_f64(&mut f64_buf, x);
+                buf.extend_from_slice(&f64_buf);
+                LittleEndian::write_f64(&mut f64_buf, y);
+                buf.extend_from_slice(&f64_buf);
+                LittleEndian::write_f64(&mut f64_buf, 12.34); // Z
+                buf.extend_from_slice(&f64_buf);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn test_c1_ewkb_flavours() {
+        let ring_coords = [
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ];
+        let rings = [&ring_coords[..]];
+
+        // Test 1: EWKB PolygonZ with SRID (little-endian)
+        let ewkb_z_srid = make_ewkb_polygon(&rings, true, true, false, false);
+        let parsed = parse_wkb_polygon(&ewkb_z_srid).expect("EWKB PolygonZ with SRID failed to parse");
+        assert_eq!(parsed.parts.len(), 1);
+        assert_eq!(parsed.parts[0].rings[0].vertices.len(), 4);
+        assert_eq!(parsed.parts[0].rings[0].vertices[1], (10.0, 0.0));
+
+        // Test 2: EWKB PolygonM (little-endian)
+        let ewkb_m = make_ewkb_polygon(&rings, false, false, true, false);
+        let parsed_m = parse_wkb_polygon(&ewkb_m).expect("EWKB PolygonM failed to parse");
+        assert_eq!(parsed_m.parts[0].rings[0].vertices[2], (10.0, 10.0));
+
+        // Test 3: EWKB PolygonZM with SRID (little-endian)
+        let ewkb_zm_srid = make_ewkb_polygon(&rings, true, true, true, false);
+        let parsed_zm = parse_wkb_polygon(&ewkb_zm_srid).expect("EWKB PolygonZM with SRID failed to parse");
+        assert_eq!(parsed_zm.parts[0].rings[0].vertices[3], (0.0, 10.0));
+
+        // Test 4: EWKB PolygonZ Big-Endian
+        let ewkb_be = make_ewkb_polygon(&rings, false, true, false, true);
+        let parsed_be = parse_wkb_polygon(&ewkb_be).expect("EWKB PolygonZ Big-Endian failed to parse");
+        assert_eq!(parsed_be.parts[0].rings[0].vertices[1], (10.0, 0.0));
+
+        // Test 5: ISO PolygonZ (code 1003)
+        let iso_z = make_iso_z_polygon(&rings);
+        let parsed_iso = parse_wkb_polygon(&iso_z).expect("ISO PolygonZ failed to parse");
+        assert_eq!(parsed_iso.parts[0].rings[0].vertices[1], (10.0, 0.0));
     }
 
     #[test]
@@ -617,7 +652,7 @@ mod tests {
 
         assert_eq!(parts.len(), 1);
         assert_eq!(rings.len(), 1);
-        assert_eq!(verts.len(), 4); // 4 vertices (closing vertex deduplicated)
+        assert_eq!(verts.len(), 4);
     }
 
     #[test]

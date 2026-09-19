@@ -34,10 +34,12 @@ cc = { version = "1.0" }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 byteorder = { workspace = true }
+geo-traits = { workspace = true }
 thiserror = { workspace = true }
+wkb = { workspace = true }
 
 [dev-dependencies]
 robust = "1.2.0"
-wkb = { workspace = true }
 wkt = { workspace = true }
+
 
