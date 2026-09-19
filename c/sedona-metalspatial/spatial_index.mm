@@ -250,6 +250,14 @@ struct MetalSpatialIndex::Impl {
             NSError *err = nil;
             MTLCompileOptions *opts = [MTLCompileOptions new];
             opts.languageVersion = MTLLanguageVersion3_0;
+            if (@available(macOS 15, *)) {
+                opts.mathMode = MTLMathModeSafe;
+            } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                opts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+            }
 
             // 1. Compile Spatial Hash Shaders
             NSString *hashSrc = [NSString stringWithUTF8String:SPATIAL_HASH_METAL_SOURCE];

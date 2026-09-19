@@ -44,7 +44,16 @@ int main() {
             return 1;
         }
 
-        id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:nil error:&error];
+        MTLCompileOptions *safeOpts = [MTLCompileOptions new];
+        if (@available(macOS 15, *)) {
+            safeOpts.mathMode = MTLMathModeSafe;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            safeOpts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+        }
+        id<MTLLibrary> library = [device newLibraryWithSource:shaderSource options:safeOpts error:&error];
         if (!library) {
             std::cerr << "Shader compilation error: " << [[error localizedDescription] UTF8String] << "\n";
             return 1;

@@ -276,7 +276,16 @@ int main() {
         std::cout << "Running Metal GPU Refiner (Apple Silicon MSL)..." << std::flush;
         NSError *error = nil;
         NSString *refineSource = [NSString stringWithContentsOfFile:@"refine.metal" encoding:NSUTF8StringEncoding error:&error];
-        id<MTLLibrary> refineLib = [device newLibraryWithSource:refineSource options:nil error:&error];
+        MTLCompileOptions *safeOpts = [MTLCompileOptions new];
+        if (@available(macOS 15, *)) {
+            safeOpts.mathMode = MTLMathModeSafe;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            safeOpts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+        }
+        id<MTLLibrary> refineLib = [device newLibraryWithSource:refineSource options:safeOpts error:&error];
         id<MTLFunction> refineFunc = [refineLib newFunctionWithName:@"point_in_polygon_refine"];
         id<MTLComputePipelineState> pipeline = [device newComputePipelineStateWithFunction:refineFunc error:&error];
 

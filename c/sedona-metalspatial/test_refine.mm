@@ -149,7 +149,17 @@ int main() {
             std::cerr << "Error reading box_intersection.metal: " << [[error localizedDescription] UTF8String] << "\n";
             return 1;
         }
-        id<MTLLibrary> boxLib = [device newLibraryWithSource:boxShaderSource options:nil error:&error];
+        MTLCompileOptions *safeOpts = [MTLCompileOptions new];
+        if (@available(macOS 15, *)) {
+            safeOpts.mathMode = MTLMathModeSafe;
+        } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            safeOpts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+        }
+
+        id<MTLLibrary> boxLib = [device newLibraryWithSource:boxShaderSource options:safeOpts error:&error];
         if (!boxLib) {
             std::cerr << "Box shader compilation error: " << [[error localizedDescription] UTF8String] << "\n";
             return 1;
@@ -169,7 +179,7 @@ int main() {
             std::cerr << "Error reading refine.metal: " << [[error localizedDescription] UTF8String] << "\n";
             return 1;
         }
-        id<MTLLibrary> refineLib = [device newLibraryWithSource:refineShaderSource options:nil error:&error];
+        id<MTLLibrary> refineLib = [device newLibraryWithSource:refineShaderSource options:safeOpts error:&error];
         if (!refineLib) {
             std::cerr << "Refine shader compilation error: " << [[error localizedDescription] UTF8String] << "\n";
             return 1;
