@@ -45,3 +45,7 @@ jobs:
       - name: Run Phase 3 Standalone Rust FFI Crate (sedona-metalspatial)
         run: |
           cargo test --package sedona-metalspatial
+
+      - name: Run Phase 4 End-to-End SedonaDB Integration (sedona-spatial-join-gpu)
+        run: |
+          cargo test -p sedona-spatial-join-gpu --features metal -- --nocapture

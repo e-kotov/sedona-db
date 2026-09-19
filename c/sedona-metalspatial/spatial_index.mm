@@ -159,11 +159,16 @@ struct MetalSpatialIndex::Impl {
                     mtl_boxes[i].max = MTLPackedFloat3Make(0.0f, 0.0f, 11.0f);
                     continue;
                 }
-                // Symmetric nextafter-based expansion to prevent grazing ray misses across any coordinate scale
-                float xmin_pad = std::nextafterf(std::nextafterf(b.xmin, -INFINITY), -INFINITY);
-                float xmax_pad = std::nextafterf(std::nextafterf(b.xmax, INFINITY), INFINITY);
-                float ymin_pad = std::nextafterf(std::nextafterf(b.ymin, -INFINITY), -INFINITY);
-                float ymax_pad = std::nextafterf(std::nextafterf(b.ymax, INFINITY), INFINITY);
+                // Conservative expansion to prevent grazing ray misses across any coordinate scale,
+                // avoiding denormal flush-to-zero (FTZ) around zero boundaries on Apple Silicon RT units.
+                float scale_x = std::max(std::max(std::abs(b.xmin), std::abs(b.xmax)), b.xmax - b.xmin);
+                float scale_y = std::max(std::max(std::abs(b.ymin), std::abs(b.ymax)), b.ymax - b.ymin);
+                float pad_x = std::max(scale_x * 1e-4f, 1e-5f);
+                float pad_y = std::max(scale_y * 1e-4f, 1e-5f);
+                float xmin_pad = b.xmin - pad_x;
+                float xmax_pad = b.xmax + pad_x;
+                float ymin_pad = b.ymin - pad_y;
+                float ymax_pad = b.ymax + pad_y;
                 mtl_boxes[i].min = MTLPackedFloat3Make(xmin_pad, ymin_pad, -0.5f);
                 mtl_boxes[i].max = MTLPackedFloat3Make(xmax_pad, ymax_pad, 0.5f);
             }

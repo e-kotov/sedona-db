@@ -91,11 +91,15 @@ MetalSpatialRefiner::~MetalSpatialRefiner() {
 }
 
 void MetalSpatialRefiner::set_error(const std::string& err) {
+    std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = err;
 }
 
 const char* MetalSpatialRefiner::get_last_error() const {
-    return last_error_.c_str();
+    static thread_local std::string s_err;
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    s_err = last_error_;
+    return s_err.c_str();
 }
 
 const char* MetalSpatialRefiner::get_device_name() const {

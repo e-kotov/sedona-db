@@ -58,7 +58,7 @@ impl SpatialJoinProvider for GpuSpatialJoinProvider {
         &self,
         schema: SchemaRef,
         spatial_predicate: SpatialPredicate,
-        _options: SpatialJoinOptions,
+        options: SpatialJoinOptions,
         join_type: JoinType,
         probe_threads_count: usize,
         metrics: SpatialJoinBuildMetrics,
@@ -66,6 +66,7 @@ impl SpatialJoinProvider for GpuSpatialJoinProvider {
         let builder = GpuSpatialIndexBuilder::new(
             schema,
             spatial_predicate,
+            options,
             self.gpu_options.clone(),
             join_type,
             probe_threads_count,

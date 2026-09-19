@@ -1290,3 +1290,97 @@ fn make_iso_z_polygon(rings: &[&[(f64, f64)]]) -> Vec<u8> {
     }
     buf
 }
+
+#[test]
+fn test_concurrent_multi_threaded_refiner() {
+    let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to initialize Metal refiner");
+    let device_name = refiner.device_name().to_string();
+
+    let poly = MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![
+                (10.0, 10.0),
+                (50.0, 10.0),
+                (50.0, 50.0),
+                (10.0, 50.0),
+            ]],
+        }],
+    };
+    let poly_wkb = make_multipoly_wkb(&poly);
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+
+    let refiner = Arc::new(refiner);
+
+    // Prepare probe points: some inside, some outside
+    let test_points = vec![
+        (25.0, 25.0), // inside
+        (30.0, 30.0), // inside
+        (5.0, 5.0),   // outside
+        (60.0, 60.0), // outside
+        (20.0, 40.0), // inside
+    ];
+    let probe_wkbs: Vec<Vec<u8>> = test_points.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+    let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+    let candidate_build: Vec<u32> = vec![0; test_points.len()];
+    let candidate_probe: Vec<u32> = (0..test_points.len() as u32).collect();
+
+    // Baseline single-threaded
+    let mut base_v_b = Vec::new();
+    let mut base_v_p = Vec::new();
+    let mut base_u_b = Vec::new();
+    let mut base_u_p = Vec::new();
+    refiner.refine(
+        &probe_array,
+        ContainerSide::Build,
+        &candidate_build,
+        &candidate_probe,
+        &mut base_v_b,
+        &mut base_v_p,
+        &mut base_u_b,
+        &mut base_u_p,
+    ).unwrap();
+
+    // 8 concurrent threads sharing the same refiner
+    let mut handles = Vec::new();
+    for thread_id in 0..8 {
+        let r = Arc::clone(&refiner);
+        let p_arr = Arc::clone(&probe_array);
+        let c_b = candidate_build.clone();
+        let c_p = candidate_probe.clone();
+        let expected_v_p = base_v_p.clone();
+        let expected_u_p = base_u_p.clone();
+
+        handles.push(std::thread::spawn(move || {
+            let mut th_v_b = Vec::new();
+            let mut th_v_p = Vec::new();
+            let mut th_u_b = Vec::new();
+            let mut th_u_p = Vec::new();
+
+            r.refine(
+                &p_arr,
+                ContainerSide::Build,
+                &c_b,
+                &c_p,
+                &mut th_v_b,
+                &mut th_v_p,
+                &mut th_u_b,
+                &mut th_u_p,
+            ).expect(&format!("Thread {} failed refine", thread_id));
+
+            assert_eq!(th_v_p, expected_v_p, "Thread {} verified probe mismatch", thread_id);
+            assert_eq!(th_u_p, expected_u_p, "Thread {} uncertain probe mismatch", thread_id);
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    println!("P5: 8-thread concurrent refiner test passed on {}", device_name);
+}
+

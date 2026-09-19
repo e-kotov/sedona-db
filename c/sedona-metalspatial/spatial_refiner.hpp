@@ -21,6 +21,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <mutex>
 
 #ifdef __OBJC__
 #import <Metal/Metal.h>
@@ -87,5 +88,6 @@ private:
 
     bool is_built_;
     std::string device_name_;
+    mutable std::mutex error_mutex_;
     mutable std::string last_error_;
 };

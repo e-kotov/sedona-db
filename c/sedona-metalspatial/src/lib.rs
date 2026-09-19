@@ -119,6 +119,11 @@ impl MetalSpatialIndex {
         Ok(Self { raw })
     }
 
+    /// Checks whether Metal hardware and pipeline state objects are available.
+    pub fn is_available() -> bool {
+        Self::try_new().is_ok()
+    }
+
     pub fn last_error(&self) -> String {
         if self.raw.is_null() {
             return "Null index pointer".to_string();
@@ -240,6 +245,10 @@ impl Drop for MetalSpatialIndex {
 
 #[cfg(not(target_os = "macos"))]
 impl MetalSpatialIndex {
+    pub fn is_available() -> bool {
+        false
+    }
+
     pub fn try_new() -> Result<Self, MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
     }
