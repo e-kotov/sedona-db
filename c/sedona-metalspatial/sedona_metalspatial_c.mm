@@ -1,0 +1,128 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+#import "sedona_metalspatial_c.h"
+#import "spatial_index.hpp"
+#include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+
+extern "C" {
+
+int SedonaMetalIndexCreate(void** out_index) {
+    if (!out_index) return -1;
+    try {
+        auto* idx = new MetalSpatialIndex();
+        if (!idx->is_valid()) {
+            delete idx;
+            *out_index = nullptr;
+            return -2;
+        }
+        *out_index = static_cast<void*>(idx);
+        return 0;
+    } catch (...) {
+        *out_index = nullptr;
+        return -1;
+    }
+}
+
+int SedonaMetalIndexPushBuild(void* index, const float* rects, uint32_t count) {
+    if (!index) return -1;
+    if (count > 0 && !rects) return -2;
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        idx->push_build(rects, count);
+        return 0;
+    } catch (...) {
+        return -3;
+    }
+}
+
+int SedonaMetalIndexFinish(void* index) {
+    if (!index) return -1;
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        idx->finish_building();
+        return 0;
+    } catch (...) {
+        return -2;
+    }
+}
+
+int SedonaMetalIndexProbe(void* index, const float* rects, uint32_t count,
+                          uint32_t** out_build, uint32_t** out_probe, uint32_t* out_len) {
+    if (!index || !out_build || !out_probe || !out_len) return -1;
+    if (count > 0 && !rects) return -2;
+
+    *out_build = nullptr;
+    *out_probe = nullptr;
+    *out_len = 0;
+
+    if (count == 0) {
+        return 0;
+    }
+
+    try {
+        auto* idx = static_cast<MetalSpatialIndex*>(index);
+        std::vector<uint32_t> build_res;
+        std::vector<uint32_t> probe_res;
+        idx->probe(rects, count, build_res, probe_res);
+
+        uint32_t num_matches = static_cast<uint32_t>(build_res.size());
+        *out_len = num_matches;
+        if (num_matches > 0) {
+            auto* b_buf = static_cast<uint32_t*>(std::malloc(num_matches * sizeof(uint32_t)));
+            auto* p_buf = static_cast<uint32_t*>(std::malloc(num_matches * sizeof(uint32_t)));
+            if (!b_buf || !p_buf) {
+                std::free(b_buf);
+                std::free(p_buf);
+                *out_len = 0;
+                return -3;
+            }
+            std::memcpy(b_buf, build_res.data(), num_matches * sizeof(uint32_t));
+            std::memcpy(p_buf, probe_res.data(), num_matches * sizeof(uint32_t));
+            *out_build = b_buf;
+            *out_probe = p_buf;
+        }
+        return 0;
+    } catch (...) {
+        if (out_build) *out_build = nullptr;
+        if (out_probe) *out_probe = nullptr;
+        if (out_len) *out_len = 0;
+        return -4;
+    }
+}
+
+void SedonaMetalIndexFreeResults(uint32_t* out_build, uint32_t* out_probe) {
+    try {
+        if (out_build) std::free(out_build);
+        if (out_probe) std::free(out_probe);
+    } catch (...) {
+    }
+}
+
+void SedonaMetalIndexFree(void* index) {
+    if (index) {
+        try {
+            delete static_cast<MetalSpatialIndex*>(index);
+        } catch (...) {
+        }
+    }
+}
+
+}

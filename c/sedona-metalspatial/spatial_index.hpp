@@ -1,0 +1,63 @@
+#pragma once
+
+#ifdef __OBJC__
+#import <Metal/Metal.h>
+typedef id<MTLDevice> MetalDeviceHandle;
+#else
+#include <cstddef>
+typedef void* MetalDeviceHandle;
+#endif
+
+#include <vector>
+#include <cstdint>
+#include <memory>
+
+enum class IndexType {
+    Auto = 0,       // Hardware RT if available and applicable, otherwise Fast Spatial Hash
+    HardwareRT = 1, // Apple Silicon Metal 3 Hardware Ray Tracing BVH
+    SpatialHash = 2 // Fast 2D Uniform Grid Compute Index
+};
+
+#ifndef SEDONA_BOUNDING_BOX_DEFINED
+#define SEDONA_BOUNDING_BOX_DEFINED
+struct BoundingBox {
+    float xmin;
+    float ymin;
+    float xmax;
+    float ymax;
+};
+
+struct MatchPair {
+    uint32_t build_idx;
+    uint32_t probe_idx;
+};
+#endif
+
+class MetalSpatialIndex {
+public:
+    explicit MetalSpatialIndex(MetalDeviceHandle device = nullptr);
+    ~MetalSpatialIndex();
+
+    // Mode control & inspection
+    void set_index_type(IndexType type);
+    IndexType get_index_type() const;
+    IndexType get_active_index_type() const;
+    bool supports_hardware_rt() const;
+    bool is_valid() const;
+
+    // SedonaDB Spatial Index API
+    void push_build(const float* rects_flat, uint32_t count);
+    void finish_building();
+    void probe(const float* rects_flat, uint32_t count,
+               std::vector<uint32_t>& out_build, std::vector<uint32_t>& out_probe);
+
+    // Diagnostics / performance metrics
+    double get_last_build_time_ms() const;
+    double get_last_probe_time_ms() const;
+    uint32_t get_build_count() const;
+    void clear();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};

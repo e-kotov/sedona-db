@@ -7,28 +7,41 @@ on:
     paths:
       - 'c/sedona-metalspatial/**'
       - '.github/workflows/metal-poc.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
     branches:
       - metal-spatial-join
     paths:
       - 'c/sedona-metalspatial/**'
       - '.github/workflows/metal-poc.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 jobs:
   test-metal-apple-silicon:
-    name: "Metal POC on Apple Silicon"
+    name: "Metal Spatial Join on Apple Silicon"
     runs-on: macos-15  # Apple Silicon M-series runner with native Metal GPU access
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build Metal Spatial Filter
+      - name: Run Phase 0 AABB Bounding Box Filter (Metal POC)
         working-directory: c/sedona-metalspatial
         run: |
-          make
+          make run
 
-      - name: Run Metal GPU Spatial Filter
+      - name: Run Phase 1 Exact Point-in-Polygon Refiner (Metal MSL)
         working-directory: c/sedona-metalspatial
         run: |
-          ./poc_metal
+          make test_refine
+
+      - name: Run Phase 2 Scalable Spatial Index (Hardware RT & Spatial Hash)
+        working-directory: c/sedona-metalspatial
+        run: |
+          make test_index_scale
+
+      - name: Run Phase 3 Standalone Rust FFI Crate (sedona-metalspatial)
+        run: |
+          cargo test --package sedona-metalspatial

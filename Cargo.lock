@@ -6019,6 +6019,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sedona-metalspatial"
+version = "0.5.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "cc",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "sedona-pointcloud"
 version = "0.5.0"
 dependencies = [
