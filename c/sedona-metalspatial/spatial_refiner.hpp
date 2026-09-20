@@ -17,11 +17,11 @@
 
 #pragma once
 
-#include "geom_types.hpp"
-#include <vector>
-#include <string>
 #include <cstdint>
 #include <mutex>
+#include <string>
+#include <vector>
+#include "geom_types.hpp"
 
 #ifdef __OBJC__
 #import <Metal/Metal.h>
@@ -30,68 +30,65 @@ typedef void* id;
 #endif
 
 class MetalSpatialRefiner {
-public:
+ public:
 #ifdef ENABLE_TEST_INTERNALS
-    MetalSpatialRefiner(id device = nullptr, int bound_mode = 0);
+  MetalSpatialRefiner(id device = nullptr, int bound_mode = 0);
 #else
-    MetalSpatialRefiner(id device = nullptr);
+  MetalSpatialRefiner(id device = nullptr);
 #endif
-    ~MetalSpatialRefiner();
+  ~MetalSpatialRefiner();
 
-    void clear();
+  void clear();
 
-    void push_polygons(
-        const PolygonRecord* polys, uint32_t poly_count,
-        const PartRecord* parts, uint32_t part_count,
-        const RingRecord* rings, uint32_t ring_count,
-        const Point2D* vertices, uint32_t vertex_count);
+  void push_polygons(const PolygonRecord* polys, uint32_t poly_count,
+                     const PartRecord* parts, uint32_t part_count,
+                     const RingRecord* rings, uint32_t ring_count,
+                     const Point2D* vertices, uint32_t vertex_count);
 
-    void finish_building();
+  void finish_building();
 
-    void refine(
-        const DecomposedPoint* points, uint32_t point_count,
-        const uint32_t* candidate_build_indices,
-        const uint32_t* candidate_probe_indices,
-        uint32_t candidate_count,
-        uint8_t* out_states);
+  void refine(const DecomposedPoint* points, uint32_t point_count,
+              const uint32_t* candidate_build_indices,
+              const uint32_t* candidate_probe_indices, uint32_t candidate_count,
+              uint8_t* out_states);
 
-    const char* get_last_error() const;
-    const char* get_device_name() const;
-    uint64_t get_memory_usage() const;
-    void set_last_error(const std::string& err);
+  const char* get_last_error() const;
+  const char* get_device_name() const;
+  uint64_t get_memory_usage() const;
+  void set_last_error(const std::string& err);
 
-private:
-    void set_error(const std::string& err);
+ private:
+  void set_error(const std::string& err);
 
 #ifdef __OBJC__
-    id<MTLDevice> device_;
-    id<MTLCommandQueue> command_queue_;
-    id<MTLComputePipelineState> pipeline_state_;
+  id<MTLDevice> device_;
+  id<MTLCommandQueue> command_queue_;
+  id<MTLComputePipelineState> pipeline_state_;
 
-    id<MTLBuffer> buf_polygons_;
-    id<MTLBuffer> buf_parts_;
-    id<MTLBuffer> buf_rings_;
-    id<MTLBuffer> buf_vertices_;
+  id<MTLBuffer> buf_polygons_;
+  id<MTLBuffer> buf_parts_;
+  id<MTLBuffer> buf_rings_;
+  id<MTLBuffer> buf_vertices_;
 #else
-    void* device_;
-    void* command_queue_;
-    void* pipeline_state_;
+  void* device_;
+  void* command_queue_;
+  void* pipeline_state_;
 
-    void* buf_polygons_;
-    void* buf_parts_;
-    void* buf_rings_;
-    void* buf_vertices_;
+  void* buf_polygons_;
+  void* buf_parts_;
+  void* buf_rings_;
+  void* buf_vertices_;
 #endif
 
-    std::vector<PolygonRecord> host_polygons_;
-    std::vector<PartRecord> host_parts_;
-    std::vector<RingRecord> host_rings_;
-    std::vector<Point2D> host_vertices_;
+  std::vector<PolygonRecord> host_polygons_;
+  std::vector<PartRecord> host_parts_;
+  std::vector<RingRecord> host_rings_;
+  std::vector<Point2D> host_vertices_;
 
-    bool is_built_;
-    uint32_t num_polygons_;
-    uint64_t allocated_bytes_;
-    std::string device_name_;
-    mutable std::mutex error_mutex_;
-    mutable std::string last_error_;
+  bool is_built_;
+  uint32_t num_polygons_;
+  uint64_t allocated_bytes_;
+  std::string device_name_;
+  mutable std::mutex error_mutex_;
+  mutable std::string last_error_;
 };

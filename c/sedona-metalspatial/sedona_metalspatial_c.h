@@ -40,29 +40,23 @@ int SedonaMetalRefinerCreate(void** out_refiner);
 #ifdef ENABLE_TEST_INTERNALS
 int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode);
 #endif
-int SedonaMetalRefinerPushPolygons(
-    void* refiner,
-    const void* polys, uint32_t poly_count,
-    const void* parts, uint32_t part_count,
-    const void* rings, uint32_t ring_count,
-    const void* vertices, uint32_t vertex_count);
+int SedonaMetalRefinerPushPolygons(void* refiner, const void* polys, uint32_t poly_count,
+                                   const void* parts, uint32_t part_count,
+                                   const void* rings, uint32_t ring_count,
+                                   const void* vertices, uint32_t vertex_count);
 int SedonaMetalRefinerFinish(void* refiner);
-int SedonaMetalRefinerRefine(
-    void* refiner,
-    const void* points, uint32_t point_count,
-    const uint32_t* candidate_build_indices,
-    const uint32_t* candidate_probe_indices,
-    uint32_t candidate_count,
-    uint8_t* out_states);
+int SedonaMetalRefinerRefine(void* refiner, const void* points, uint32_t point_count,
+                             const uint32_t* candidate_build_indices,
+                             const uint32_t* candidate_probe_indices,
+                             uint32_t candidate_count, uint8_t* out_states);
 int SedonaMetalRefinerClear(void* refiner);
 void SedonaMetalRefinerFree(void* refiner);
 const char* SedonaMetalRefinerGetLastError(void* refiner);
 const char* SedonaMetalRefinerGetDeviceName(void* refiner);
 uint64_t SedonaMetalRefinerGetMemUsage(void* refiner);
 
-
 #ifdef __cplusplus
 }
 #endif
 
-#endif // SEDONA_METALSPATIAL_C_H
+#endif  // SEDONA_METALSPATIAL_C_H
