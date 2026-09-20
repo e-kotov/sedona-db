@@ -39,6 +39,7 @@ thiserror = { workspace = true }
 wkb = { workspace = true }
 
 [dev-dependencies]
+geos = { workspace = true }
 robust = "1.2.0"
 wkt = { workspace = true }
 sedona-metalspatial = { path = ".", features = ["test-internals"] }

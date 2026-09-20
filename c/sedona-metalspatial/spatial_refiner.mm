@@ -33,6 +33,9 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device)
       buf_parts_(nil),
       buf_rings_(nil),
       buf_vertices_(nil),
+      exact_pipeline_(nil),
+      buf_exact_vertices_(nil),
+      buf_exact_poly_ok_(nil),
       is_built_(false),
       num_polygons_(0),
       allocated_bytes_(0) {
@@ -118,6 +121,9 @@ void MetalSpatialRefiner::clear() {
     buf_parts_ = nil;
     buf_rings_ = nil;
     buf_vertices_ = nil;
+    buf_exact_vertices_ = nil;
+    buf_exact_poly_ok_ = nil;
+    exact_allocated_bytes_ = 0;
 
     host_polygons_.clear();
     host_parts_.clear();
@@ -326,3 +332,154 @@ void MetalSpatialRefiner::refine(const DecomposedPoint* points, uint32_t point_c
     }
   }
 }
+
+#ifdef ENABLE_TEST_INTERNALS
+// --- PROTOTYPE: exact second-stage resolver (measurement only) ---
+
+void MetalSpatialRefiner::finish_exact(const FixedVertex* vertices, uint32_t vertex_count,
+                                       const uint32_t* poly_exact_ok, uint32_t poly_count) {
+  @autoreleasepool {
+    if (!is_built_) {
+      set_error("finish_building() must be called before finish_exact()");
+      throw std::runtime_error("Refiner not built");
+    }
+
+    if (!exact_pipeline_) {
+      // The exact pass never touches a float, so its result does not depend on
+      // the math mode; verified by running the correctness gates under
+      // MTLMathModeFast. Safe is kept to match the production pipeline.
+      MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+      if (@available(macOS 15.0, *)) {
+        options.mathMode = MTLMathModeSafe;
+      }
+      NSError* error = nil;
+      NSString* src = [NSString stringWithUTF8String:REFINE_EXACT_METAL_SOURCE];
+      id<MTLLibrary> library = [device_ newLibraryWithSource:src options:options error:&error];
+      if (!library) {
+        std::string err_str =
+            error ? [[error localizedDescription] UTF8String] : "Unknown shader error";
+        set_error("Failed to compile refine_exact.metal: " + err_str);
+        throw std::runtime_error("Failed to compile refine_exact.metal: " + err_str);
+      }
+      id<MTLFunction> kernel_fn = [library newFunctionWithName:@"point_in_polygon_exact"];
+      if (!kernel_fn) {
+        set_error("Function point_in_polygon_exact not found");
+        throw std::runtime_error("Function point_in_polygon_exact not found");
+      }
+      exact_pipeline_ = [device_ newComputePipelineStateWithFunction:kernel_fn error:&error];
+      if (!exact_pipeline_) {
+        std::string err_str =
+            error ? [[error localizedDescription] UTF8String] : "Unknown pipeline error";
+        set_error("Failed to create exact pipeline state: " + err_str);
+        throw std::runtime_error("Failed to create exact pipeline state: " + err_str);
+      }
+    }
+
+    static const char kZero[16] = {0};
+    size_t vert_size = std::max(vertex_count * sizeof(FixedVertex), (size_t)16);
+    size_t ok_size = std::max(poly_count * sizeof(uint32_t), (size_t)16);
+
+    buf_exact_vertices_ =
+        [device_ newBufferWithBytes:vertex_count == 0 ? (const void*)kZero : (const void*)vertices
+                             length:vert_size
+                            options:MTLResourceStorageModeShared];
+    buf_exact_poly_ok_ = [device_
+        newBufferWithBytes:poly_count == 0 ? (const void*)kZero : (const void*)poly_exact_ok
+                    length:ok_size
+                   options:MTLResourceStorageModeShared];
+
+    if (!buf_exact_vertices_ || !buf_exact_poly_ok_) {
+      set_error("Failed to allocate Metal buffers for exact geometry");
+      throw std::runtime_error("Exact buffer allocation failed");
+    }
+    exact_allocated_bytes_ = vert_size + ok_size;
+  }
+}
+
+void MetalSpatialRefiner::refine_exact(const FixedProbe* points, uint32_t point_count,
+                                       const uint32_t* candidate_build_indices,
+                                       const uint32_t* candidate_probe_indices,
+                                       uint32_t candidate_count, uint8_t* out_states) {
+  if (candidate_count == 0) return;
+  if (!exact_pipeline_ || !buf_exact_vertices_) {
+    set_error("finish_exact() must be called before refine_exact()");
+    throw std::runtime_error("Exact stage not built");
+  }
+
+  @autoreleasepool {
+    static const char kZero[16] = {0};
+    size_t pts_size = std::max(point_count * sizeof(FixedProbe), (size_t)16);
+    id<MTLBuffer> buf_points =
+        [device_ newBufferWithBytes:point_count == 0 ? (const void*)kZero : (const void*)points
+                             length:pts_size
+                            options:MTLResourceStorageModeShared];
+    if (!buf_points) {
+      set_error("Failed to allocate Metal buffer for exact probe points");
+      throw std::runtime_error("Buffer allocation failed");
+    }
+
+    uint32_t num_polygons = num_polygons_;
+    const uint32_t CHUNK_SIZE = 65536;
+
+    for (uint32_t offset = 0; offset < candidate_count; offset += CHUNK_SIZE) {
+      @autoreleasepool {
+        uint32_t chunk_len = std::min(CHUNK_SIZE, candidate_count - offset);
+
+        std::vector<CandidatePair> chunk_pairs(chunk_len);
+        for (uint32_t i = 0; i < chunk_len; ++i) {
+          chunk_pairs[i] = CandidatePair{candidate_build_indices[offset + i],
+                                         candidate_probe_indices[offset + i]};
+        }
+
+        id<MTLBuffer> buf_candidates =
+            [device_ newBufferWithBytes:chunk_pairs.data()
+                                 length:chunk_len * sizeof(CandidatePair)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> buf_states =
+            [device_ newBufferWithLength:chunk_len * sizeof(uint8_t)
+                                 options:MTLResourceStorageModeShared];
+        if (!buf_candidates || !buf_states) {
+          set_error("Failed to allocate exact candidate buffers for chunk");
+          throw std::runtime_error("Chunk buffer allocation failed");
+        }
+
+        id<MTLCommandBuffer> cmd_buffer = [command_queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmd_buffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:exact_pipeline_];
+        [encoder setBuffer:buf_candidates offset:0 atIndex:0];
+        [encoder setBuffer:buf_polygons_ offset:0 atIndex:1];
+        [encoder setBuffer:buf_parts_ offset:0 atIndex:2];
+        [encoder setBuffer:buf_rings_ offset:0 atIndex:3];
+        [encoder setBuffer:buf_exact_vertices_ offset:0 atIndex:4];
+        [encoder setBuffer:buf_points offset:0 atIndex:5];
+        [encoder setBuffer:buf_exact_poly_ok_ offset:0 atIndex:6];
+        [encoder setBuffer:buf_states offset:0 atIndex:7];
+        [encoder setBytes:&chunk_len length:sizeof(uint32_t) atIndex:8];
+        [encoder setBytes:&num_polygons length:sizeof(uint32_t) atIndex:9];
+
+        NSUInteger max_threads = exact_pipeline_.maxTotalThreadsPerThreadgroup;
+        NSUInteger tg_size = std::min((NSUInteger)256, max_threads);
+        MTLSize threadgroups = MTLSizeMake((chunk_len + tg_size - 1) / tg_size, 1, 1);
+        MTLSize threads_per_tg = MTLSizeMake(tg_size, 1, 1);
+
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_tg];
+        [encoder endEncoding];
+        [cmd_buffer commit];
+        [cmd_buffer waitUntilCompleted];
+
+        if (cmd_buffer.status != MTLCommandBufferStatusCompleted) {
+          std::string err_desc =
+              cmd_buffer.error ? [[cmd_buffer.error localizedDescription] UTF8String]
+                               : "Unknown GPU error";
+          set_error("Exact kernel execution failed: " + err_desc);
+          throw std::runtime_error("GPU execution failed");
+        }
+
+        std::memcpy(out_states + offset, (const uint8_t*)buf_states.contents,
+                    chunk_len * sizeof(uint8_t));
+      }
+    }
+  }
+}
+#endif  // ENABLE_TEST_INTERNALS

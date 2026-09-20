@@ -6027,6 +6027,7 @@ dependencies = [
  "byteorder",
  "cc",
  "geo-traits",
+ "geos",
  "robust",
  "sedona-metalspatial",
  "thiserror 2.0.20",

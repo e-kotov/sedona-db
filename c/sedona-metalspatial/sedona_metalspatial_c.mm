@@ -299,6 +299,54 @@ int SedonaMetalRefinerRefine(void* refiner, const void* points, uint32_t point_c
   }
 }
 
+#ifdef ENABLE_TEST_INTERNALS
+// --- PROTOTYPE: exact second-stage resolver (measurement only) ---
+int SedonaMetalRefinerFinishExact(void* refiner, const void* vertices, uint32_t vertex_count,
+                                  const uint32_t* poly_exact_ok, uint32_t poly_count) {
+  if (!refiner) return -1;
+  try {
+    auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+    ref->finish_exact(static_cast<const FixedVertex*>(vertices), vertex_count, poly_exact_ok,
+                      poly_count);
+    return 0;
+  } catch (const std::exception& e) {
+    static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+    return -3;
+  } catch (...) {
+    static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
+    return -3;
+  }
+}
+
+int SedonaMetalRefinerRefineExact(void* refiner, const void* points, uint32_t point_count,
+                                  const uint32_t* candidate_build_indices,
+                                  const uint32_t* candidate_probe_indices,
+                                  uint32_t candidate_count, uint8_t* out_states) {
+  if (!refiner) return -1;
+  if (candidate_count > 0 &&
+      (!candidate_build_indices || !candidate_probe_indices || !out_states))
+    return -2;
+  try {
+    auto* ref = static_cast<MetalSpatialRefiner*>(refiner);
+    ref->refine_exact(static_cast<const FixedProbe*>(points), point_count,
+                      candidate_build_indices, candidate_probe_indices, candidate_count,
+                      out_states);
+    return 0;
+  } catch (const std::exception& e) {
+    static_cast<MetalSpatialRefiner*>(refiner)->set_last_error(e.what());
+    return -3;
+  } catch (...) {
+    static_cast<MetalSpatialRefiner*>(refiner)->set_last_error("Unknown C++ exception occurred");
+    return -3;
+  }
+}
+
+uint64_t SedonaMetalRefinerGetExactMemUsage(void* refiner) {
+  if (!refiner) return 0;
+  return static_cast<MetalSpatialRefiner*>(refiner)->get_exact_memory_usage();
+}
+#endif  // ENABLE_TEST_INTERNALS
+
 int SedonaMetalRefinerClear(void* refiner) {
   if (!refiner) return -1;
   try {

@@ -45,6 +45,13 @@ pub struct MetalSpatialRefiner {
     device_name: String,
     #[cfg(target_os = "macos")]
     num_build_polygons: usize,
+    /// PROTOTYPE: raw f64 build coordinates retained until `finish_exact()`.
+    #[cfg(all(target_os = "macos", feature = "test-internals"))]
+    exact_coords: Vec<(f64, f64)>,
+    #[cfg(all(target_os = "macos", feature = "test-internals"))]
+    exact_ranges: Vec<(u32, u32)>,
+    #[cfg(all(target_os = "macos", feature = "test-internals"))]
+    exact_scale: i32,
 }
 
 #[cfg(target_os = "macos")]
@@ -82,6 +89,12 @@ impl MetalSpatialRefiner {
             raw,
             device_name: dev_name,
             num_build_polygons: 0,
+            #[cfg(feature = "test-internals")]
+            exact_coords: Vec::new(),
+            #[cfg(feature = "test-internals")]
+            exact_ranges: Vec::new(),
+            #[cfg(feature = "test-internals")]
+            exact_scale: 0,
         })
     }
 
@@ -124,6 +137,12 @@ impl MetalSpatialRefiner {
             raw,
             device_name: dev_name,
             num_build_polygons: 0,
+            #[cfg(feature = "test-internals")]
+            exact_coords: Vec::new(),
+            #[cfg(feature = "test-internals")]
+            exact_ranges: Vec::new(),
+            #[cfg(feature = "test-internals")]
+            exact_scale: 0,
         })
     }
 
@@ -176,7 +195,118 @@ impl MetalSpatialRefiner {
             return Err(MetalSpatialError::ClearFailed { code: rc, msg });
         }
         self.num_build_polygons = 0;
+        #[cfg(feature = "test-internals")]
+        {
+            self.exact_coords.clear();
+            self.exact_ranges.clear();
+            self.exact_scale = 0;
+        }
         Ok(())
+    }
+
+    /// PROTOTYPE: accumulates the raw f64 build coordinates that back the exact
+    /// second-stage resolver. Must be called with the same arrays, in the same
+    /// order, as [`Self::push_build`].
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn push_build_exact(&mut self, array: &ArrayRef) {
+        let (coords, ranges) = crate::flattener::flatten_build_exact_coords(array);
+        let offset = self.exact_coords.len() as u32;
+        self.exact_coords.extend_from_slice(&coords);
+        self.exact_ranges
+            .extend(ranges.into_iter().map(|(s, c)| (s + offset, c)));
+    }
+
+    /// PROTOTYPE: picks the batch-global fixed-point scale, converts every
+    /// build vertex exactly, and uploads the exact mirror buffers.
+    /// Returns `(scale_exponent, polygons_not_representable)`.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn finish_exact(&mut self) -> Result<(i32, usize), MetalSpatialError> {
+        use crate::flattener::{binary_exponent, build_exact_vertices, choose_fixed_scale};
+
+        let mut max_exp = 0i32;
+        for &(x, y) in &self.exact_coords {
+            if let Some(e) = binary_exponent(x) {
+                max_exp = max_exp.max(e);
+            }
+            if let Some(e) = binary_exponent(y) {
+                max_exp = max_exp.max(e);
+            }
+        }
+        let scale = choose_fixed_scale(max_exp);
+        self.exact_scale = scale;
+
+        let (verts, poly_ok) = build_exact_vertices(&self.exact_coords, &self.exact_ranges, scale);
+        let not_ok = poly_ok.iter().filter(|&&ok| ok == 0).count();
+
+        let rc = unsafe {
+            ffi::SedonaMetalRefinerFinishExact(
+                self.raw,
+                verts.as_ptr() as *const c_void,
+                verts.len() as u32,
+                poly_ok.as_ptr(),
+                poly_ok.len() as u32,
+            )
+        };
+        if rc != 0 {
+            let msg = self.last_error();
+            return Err(MetalSpatialError::FinishFailed { code: rc, msg });
+        }
+        Ok((scale, not_ok))
+    }
+
+    /// PROTOTYPE: fixed-point scale exponent chosen by the last `finish_exact`.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn exact_scale(&self) -> i32 {
+        self.exact_scale
+    }
+
+    /// PROTOTYPE: GPU bytes held by the exact mirror buffers.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn exact_memory_usage(&self) -> usize {
+        unsafe { ffi::SedonaMetalRefinerGetExactMemUsage(self.raw) as usize }
+    }
+
+    /// PROTOTYPE: resolves already-compacted candidate pairs exactly on the GPU.
+    /// Returns one state per pair: 0 outside, 1 inside, 3 boundary,
+    /// 4 not decided (inputs outside the fixed-point frame).
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn refine_exact(
+        &self,
+        points: &[crate::flattener::FixedProbe],
+        candidate_build_indices: &[u32],
+        candidate_probe_indices: &[u32],
+    ) -> Result<Vec<u8>, MetalSpatialError> {
+        let n = candidate_build_indices.len();
+        if n != candidate_probe_indices.len() {
+            return Err(MetalSpatialError::InvalidState(
+                "Candidate build and probe index slices must have equal length".to_string(),
+            ));
+        }
+        let mut states = vec![crate::flattener::EXACT_NOT_DECIDED; n];
+        if n == 0 {
+            return Ok(states);
+        }
+        let rc = unsafe {
+            ffi::SedonaMetalRefinerRefineExact(
+                self.raw,
+                points.as_ptr() as *const c_void,
+                points.len() as u32,
+                candidate_build_indices.as_ptr(),
+                candidate_probe_indices.as_ptr(),
+                n as u32,
+                states.as_mut_ptr(),
+            )
+        };
+        if rc != 0 {
+            let msg = self.last_error();
+            return Err(MetalSpatialError::ProbeFailed { code: rc, msg });
+        }
+        Ok(states)
     }
 
     /// Parses Arrow array of build geometries, flattens to GPU records, and discards WKB.

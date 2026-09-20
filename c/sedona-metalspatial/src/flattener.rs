@@ -24,6 +24,12 @@ pub const STATE_OUTSIDE: u32 = 0;
 pub const STATE_INSIDE: u32 = 1;
 pub const STATE_UNCERTAIN: u32 = 2;
 
+/// PROTOTYPE: states emitted by the exact second-stage resolver.
+pub const EXACT_OUTSIDE: u8 = 0;
+pub const EXACT_INSIDE: u8 = 1;
+pub const EXACT_BOUNDARY: u8 = 3;
+pub const EXACT_NOT_DECIDED: u8 = 4;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point2D {
@@ -372,6 +378,245 @@ pub fn flatten_build_polygons(
     }
 
     (poly_records, part_records, ring_records, vertex_array)
+}
+
+// ---------------------------------------------------------------------------
+// PROTOTYPE: exact second-stage resolver inputs (measurement only)
+//
+// Every f64 coordinate is re-expressed as an exact 128-bit two's-complement
+// integer at a single batch-global binary scale 2^L. The conversion is
+// bit-exact (no rounding) or it fails, in which case the coordinate is flagged
+// and its pairs fall back to the CPU.
+// ---------------------------------------------------------------------------
+
+/// Exact 128-bit fixed-point vertex (32 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FixedVertex {
+    pub x: [u32; 4],
+    pub y: [u32; 4],
+}
+
+/// Exact 128-bit fixed-point probe point (40 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FixedProbe {
+    pub x: [u32; 4],
+    pub y: [u32; 4],
+    pub is_exact: u32,
+    pub _padding: u32,
+}
+
+/// Distance in binary places between the largest build coordinate and the
+/// fixed-point LSB. Also the amount of headroom probe points get *below* the
+/// ULP of that largest coordinate: a probe is representable exactly as long as
+/// its own binary exponent is at least `max_exponent - (SCALE_HEADROOM - 52)`,
+/// i.e. 70 octaves below the biggest vertex.
+const SCALE_HEADROOM: i32 = 122;
+
+/// Hard cap on |fixed| so that differences stay below 2^125 (inside i128) and
+/// the 128x128 -> 256 products in the kernel stay below 2^250.
+const FIXED_LIMIT_EXP: u32 = 124;
+
+#[inline]
+fn i128_to_limbs(v: i128) -> [u32; 4] {
+    let u = v as u128;
+    [
+        (u & 0xFFFF_FFFF) as u32,
+        ((u >> 32) & 0xFFFF_FFFF) as u32,
+        ((u >> 64) & 0xFFFF_FFFF) as u32,
+        ((u >> 96) & 0xFFFF_FFFF) as u32,
+    ]
+}
+
+/// Binary exponent of |v| (floor(log2|v|)) for finite non-zero v.
+#[inline]
+pub fn binary_exponent(v: f64) -> Option<i32> {
+    if v == 0.0 || !v.is_finite() {
+        return None;
+    }
+    let bits = v.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    if biased == 0 {
+        // subnormal: value = frac * 2^-1074
+        let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+        Some(63 - frac.leading_zeros() as i32 - 1074)
+    } else {
+        Some(biased - 1023)
+    }
+}
+
+/// Chooses the batch-global fixed-point scale exponent L from the largest
+/// coordinate magnitude present in the build geometry.
+pub fn choose_fixed_scale(max_exponent: i32) -> i32 {
+    max_exponent - SCALE_HEADROOM
+}
+
+/// Exact conversion of an f64 to a 128-bit integer at scale 2^l.
+/// Returns `None` when `v` is not an integer multiple of 2^l, when it does not
+/// fit, or when it is not finite. Never rounds.
+#[inline]
+pub fn f64_to_fixed(v: f64, l: i32) -> Option<i128> {
+    if v == 0.0 {
+        return Some(0);
+    }
+    if !v.is_finite() {
+        return None;
+    }
+    let bits = v.to_bits();
+    let negative = (bits >> 63) != 0;
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000F_FFFF_FFFF_FFFF;
+    let (mant, exp) = if biased == 0 {
+        (frac, -1074i32)
+    } else {
+        (frac | (1u64 << 52), biased - 1075)
+    };
+
+    let shift = exp - l;
+    let magnitude: i128 = if shift >= 0 {
+        if shift > 74 {
+            return None; // mant << shift would not fit in u128 at all
+        }
+        let m = (mant as u128) << shift;
+        if m >= (1u128 << FIXED_LIMIT_EXP) {
+            return None; // magnitude outside the frame
+        }
+        m as i128
+    } else {
+        let s = (-shift) as u32;
+        if s >= 64 {
+            return None;
+        }
+        if (mant & ((1u64 << s) - 1)) != 0 {
+            return None; // would lose bits: not representable exactly
+        }
+        (mant >> s) as i128
+    };
+
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+/// Parses build polygons into the raw f64 vertex stream in exactly the same
+/// order as [`flatten_build_polygons`], together with the per-polygon vertex
+/// range. Used to build the exact mirror of the vertex buffer.
+#[allow(clippy::type_complexity)]
+pub fn flatten_build_exact_coords(array: &ArrayRef) -> (Vec<(f64, f64)>, Vec<(u32, u32)>) {
+    let num_rows = array.len();
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(num_rows);
+
+    for row in 0..num_rows {
+        let start = coords.len() as u32;
+        let wkb_bytes = match extract_wkb_slice(array, row) {
+            Some(bytes) => bytes,
+            None => {
+                ranges.push((start, 0));
+                continue;
+            }
+        };
+        let raw_poly = match parse_wkb_polygon(wkb_bytes) {
+            Some(p) if !p.parts.is_empty() => p,
+            _ => {
+                ranges.push((start, 0));
+                continue;
+            }
+        };
+
+        let mut total_verts = 0usize;
+        for part in &raw_poly.parts {
+            for ring in &part.rings {
+                total_verts += ring.vertices.len();
+            }
+        }
+        if total_verts < 3 {
+            ranges.push((start, 0));
+            continue;
+        }
+
+        for part in &raw_poly.parts {
+            for ring in &part.rings {
+                for &(vx, vy) in &ring.vertices {
+                    coords.push((vx, vy));
+                }
+            }
+        }
+        ranges.push((start, coords.len() as u32 - start));
+    }
+
+    (coords, ranges)
+}
+
+/// Converts the raw f64 vertex stream into exact fixed-point vertices at scale
+/// `l`, returning the per-polygon admissibility flags.
+pub fn build_exact_vertices(
+    coords: &[(f64, f64)],
+    ranges: &[(u32, u32)],
+    l: i32,
+) -> (Vec<FixedVertex>, Vec<u32>) {
+    let mut verts = Vec::with_capacity(coords.len());
+    let mut exact = vec![true; coords.len()];
+
+    for (i, &(vx, vy)) in coords.iter().enumerate() {
+        let fx = f64_to_fixed(vx, l);
+        let fy = f64_to_fixed(vy, l);
+        match (fx, fy) {
+            (Some(a), Some(b)) => verts.push(FixedVertex {
+                x: i128_to_limbs(a),
+                y: i128_to_limbs(b),
+            }),
+            _ => {
+                exact[i] = false;
+                verts.push(FixedVertex::default());
+            }
+        }
+    }
+
+    let poly_ok = ranges
+        .iter()
+        .map(|&(start, count)| {
+            if count == 0 {
+                return 0u32;
+            }
+            let s = start as usize;
+            let e = s + count as usize;
+            if exact[s..e].iter().all(|&ok| ok) {
+                1
+            } else {
+                0
+            }
+        })
+        .collect();
+
+    (verts, poly_ok)
+}
+
+/// Flattens probe geometries into exact fixed-point probe points at scale `l`.
+pub fn flatten_probe_exact(array: &ArrayRef, l: i32) -> Vec<FixedProbe> {
+    let num_rows = array.len();
+    let mut out = Vec::with_capacity(num_rows);
+    for row in 0..num_rows {
+        let wkb_bytes = match extract_wkb_slice(array, row) {
+            Some(bytes) => bytes,
+            None => {
+                out.push(FixedProbe::default());
+                continue;
+            }
+        };
+        match parse_wkb_point(wkb_bytes) {
+            Some((x, y)) => match (f64_to_fixed(x, l), f64_to_fixed(y, l)) {
+                (Some(a), Some(b)) => out.push(FixedProbe {
+                    x: i128_to_limbs(a),
+                    y: i128_to_limbs(b),
+                    is_exact: 1,
+                    _padding: 0,
+                }),
+                _ => out.push(FixedProbe::default()),
+            },
+            None => out.push(FixedProbe::default()),
+        }
+    }
+    out
 }
 
 /// Flattens a batch of probe geometries into DecomposedPoint buffer.

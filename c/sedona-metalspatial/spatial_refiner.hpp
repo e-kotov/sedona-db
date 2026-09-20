@@ -52,6 +52,21 @@ class MetalSpatialRefiner {
               const uint32_t* candidate_probe_indices, uint32_t candidate_count,
               uint8_t* out_states);
 
+#ifdef ENABLE_TEST_INTERNALS
+  // --- PROTOTYPE: exact second-stage resolver (measurement only) ---
+  // Uploads the exact 128-bit fixed-point mirror of the vertex buffer plus a
+  // per-polygon admissibility flag, and compiles the exact pipeline lazily.
+  void finish_exact(const FixedVertex* vertices, uint32_t vertex_count,
+                    const uint32_t* poly_exact_ok, uint32_t poly_count);
+
+  void refine_exact(const FixedProbe* points, uint32_t point_count,
+                    const uint32_t* candidate_build_indices,
+                    const uint32_t* candidate_probe_indices,
+                    uint32_t candidate_count, uint8_t* out_states);
+
+  uint64_t get_exact_memory_usage() const { return exact_allocated_bytes_; }
+#endif
+
   const char* get_last_error() const;
   const char* get_device_name() const;
   uint64_t get_memory_usage() const;
@@ -69,6 +84,9 @@ class MetalSpatialRefiner {
   id<MTLBuffer> buf_parts_;
   id<MTLBuffer> buf_rings_;
   id<MTLBuffer> buf_vertices_;
+  id<MTLComputePipelineState> exact_pipeline_;
+  id<MTLBuffer> buf_exact_vertices_;
+  id<MTLBuffer> buf_exact_poly_ok_;
 #else
   void* device_;
   void* command_queue_;
@@ -78,6 +96,9 @@ class MetalSpatialRefiner {
   void* buf_parts_;
   void* buf_rings_;
   void* buf_vertices_;
+  void* exact_pipeline_;
+  void* buf_exact_vertices_;
+  void* buf_exact_poly_ok_;
 #endif
 
   std::vector<PolygonRecord> host_polygons_;
@@ -88,6 +109,7 @@ class MetalSpatialRefiner {
   bool is_built_;
   uint32_t num_polygons_;
   uint64_t allocated_bytes_;
+  uint64_t exact_allocated_bytes_ = 0;
   std::string device_name_;
   mutable std::mutex error_mutex_;
   mutable std::string last_error_;

@@ -70,6 +70,28 @@ pub mod ffi {
             candidate_count: u32,
             out_states: *mut u8,
         ) -> i32;
+        // PROTOTYPE: exact second-stage resolver (test-internals only)
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerFinishExact(
+            refiner: *mut c_void,
+            vertices: *const c_void,
+            vertex_count: u32,
+            poly_exact_ok: *const u32,
+            poly_count: u32,
+        ) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerRefineExact(
+            refiner: *mut c_void,
+            points: *const c_void,
+            point_count: u32,
+            candidate_build_indices: *const u32,
+            candidate_probe_indices: *const u32,
+            candidate_count: u32,
+            out_states: *mut u8,
+        ) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerGetExactMemUsage(refiner: *mut c_void) -> u64;
+
         pub fn SedonaMetalRefinerClear(refiner: *mut c_void) -> i32;
         pub fn SedonaMetalRefinerFree(refiner: *mut c_void);
         pub fn SedonaMetalRefinerGetLastError(refiner: *mut c_void) -> *const std::ffi::c_char;

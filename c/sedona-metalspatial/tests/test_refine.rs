@@ -20,9 +20,14 @@
 use arrow_array::{ArrayRef, BinaryArray};
 use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use robust::Coord;
+use sedona_metalspatial::flattener::{
+    EXACT_BOUNDARY, EXACT_INSIDE, EXACT_NOT_DECIDED, EXACT_OUTSIDE, FixedProbe, f64_to_fixed,
+    flatten_probe_exact,
+};
 use sedona_metalspatial::{ContainerSide, MetalSpatialRefiner};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OracleResult {
@@ -1731,5 +1736,1169 @@ fn test_concurrent_multi_threaded_refiner() {
     println!(
         "P5: 8-thread concurrent refiner test passed on {}",
         device_name
+    );
+}
+
+// =============================================================================
+// PROTOTYPE: exact GPU second-stage resolver (measurement only)
+//
+// These tests drive `MetalSpatialRefiner::refine_exact`, a second compute pass
+// that decides the uncertain residue of the f32 kernel exactly, in 128-bit
+// fixed-point integer arithmetic, without a CPU hop. The production path
+// (BOUND_MODE 0 + CPU fallback) is untouched: the exact pipeline is only
+// reachable through `#[cfg(feature = "test-internals")]` entry points.
+// =============================================================================
+
+fn limbs_of(v: i128) -> [u32; 4] {
+    let u = v as u128;
+    [
+        (u & 0xFFFF_FFFF) as u32,
+        ((u >> 32) & 0xFFFF_FFFF) as u32,
+        ((u >> 64) & 0xFFFF_FFFF) as u32,
+        ((u >> 96) & 0xFFFF_FFFF) as u32,
+    ]
+}
+
+fn fixed_probe_from_coord(x: f64, y: f64, scale: i32) -> FixedProbe {
+    match (f64_to_fixed(x, scale), f64_to_fixed(y, scale)) {
+        (Some(a), Some(b)) => FixedProbe {
+            x: limbs_of(a),
+            y: limbs_of(b),
+            is_exact: 1,
+            _padding: 0,
+        },
+        _ => FixedProbe::default(),
+    }
+}
+
+fn exact_state_name(s: u8) -> &'static str {
+    match s {
+        EXACT_OUTSIDE => "Outside",
+        EXACT_INSIDE => "Inside",
+        EXACT_BOUNDARY => "Boundary",
+        _ => "NotDecided",
+    }
+}
+
+fn oracle_state(o: OracleResult) -> u8 {
+    match o {
+        OracleResult::Inside => EXACT_INSIDE,
+        OracleResult::Outside => EXACT_OUTSIDE,
+        OracleResult::OnBoundary => EXACT_BOUNDARY,
+    }
+}
+
+struct ExactRun {
+    uncertain: Vec<(u32, u32)>,
+    states: Vec<u8>,
+    verified_count: usize,
+    scale: i32,
+    polys_not_representable: usize,
+    t_build_exact_ms: f64,
+    t_f32_ms: f64,
+    t_prep_full_ms: f64,
+    t_prep_subset_ms: f64,
+    t_exact_ms: f64,
+    f32_bytes: usize,
+    exact_bytes: usize,
+}
+
+/// Builds both pipelines on one refiner, runs the f32 pass, compacts its
+/// uncertain output and resolves that residue with the exact GPU pass.
+fn run_exact_pipeline(
+    mode: i32,
+    poly_array: &ArrayRef,
+    probe_array: &ArrayRef,
+    probe_coords: &[(f64, f64)],
+    cand_b: &[u32],
+    cand_p: &[u32],
+) -> ExactRun {
+    let mut refiner = MetalSpatialRefiner::try_new_with_mode(mode).expect("refiner");
+    refiner.push_build(poly_array).unwrap();
+    refiner.finish_building().unwrap();
+
+    let t0 = Instant::now();
+    refiner.push_build_exact(poly_array);
+    let (scale, not_ok) = refiner.finish_exact().unwrap();
+    let t_build_exact_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    let (mut vb, mut vp, mut ub, mut up) = (vec![], vec![], vec![], vec![]);
+    let t1 = Instant::now();
+    refiner
+        .refine(
+            probe_array,
+            ContainerSide::Build,
+            cand_b,
+            cand_p,
+            &mut vb,
+            &mut vp,
+            &mut ub,
+            &mut up,
+        )
+        .unwrap();
+    let t_f32_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    // Per-batch cost A: re-parse the whole probe WKB column into exact form.
+    let t2 = Instant::now();
+    let full = flatten_probe_exact(probe_array, scale);
+    let t_prep_full_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+    // Per-batch cost B: compact the residue into a dense probe buffer, reusing
+    // coordinates the f32 pass already parsed. This is what a real integration
+    // would do, and it makes the upload O(residue) rather than O(batch).
+    let t3 = Instant::now();
+    let dense: Vec<FixedProbe> = up
+        .iter()
+        .map(|&p| {
+            let (x, y) = probe_coords[p as usize];
+            fixed_probe_from_coord(x, y, scale)
+        })
+        .collect();
+    let dense_idx: Vec<u32> = (0..dense.len() as u32).collect();
+    let t_prep_subset_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+    for (k, &p) in up.iter().enumerate() {
+        assert_eq!(
+            dense[k], full[p as usize],
+            "compacted and full exact probe conversion disagree at {p}"
+        );
+    }
+
+    let t4 = Instant::now();
+    let states = refiner.refine_exact(&dense, &ub, &dense_idx).unwrap();
+    let t_exact_ms = t4.elapsed().as_secs_f64() * 1000.0;
+
+    ExactRun {
+        uncertain: ub.iter().copied().zip(up.iter().copied()).collect(),
+        states,
+        verified_count: vb.len(),
+        scale,
+        polys_not_representable: not_ok,
+        t_build_exact_ms,
+        t_f32_ms,
+        t_prep_full_ms,
+        t_prep_subset_ms,
+        t_exact_ms,
+        f32_bytes: refiner.get_memory_usage(),
+        exact_bytes: refiner.exact_memory_usage(),
+    }
+}
+
+struct ExactTally {
+    inside: usize,
+    outside: usize,
+    boundary: usize,
+    not_decided: usize,
+    mismatches: usize,
+}
+
+fn tally_against_oracle(
+    pairs: &[(u32, u32)],
+    states: &[u8],
+    polys: &[MultiPolyDef],
+    probes: &[(f64, f64)],
+) -> ExactTally {
+    let mut t = ExactTally {
+        inside: 0,
+        outside: 0,
+        boundary: 0,
+        not_decided: 0,
+        mismatches: 0,
+    };
+    for (k, &(b, p)) in pairs.iter().enumerate() {
+        let (px, py) = probes[p as usize];
+        let want = oracle_state(exact_pip_oracle(&polys[b as usize], px, py));
+        match states[k] {
+            EXACT_INSIDE => t.inside += 1,
+            EXACT_OUTSIDE => t.outside += 1,
+            EXACT_BOUNDARY => t.boundary += 1,
+            _ => {
+                t.not_decided += 1;
+                continue;
+            }
+        }
+        if states[k] != want {
+            t.mismatches += 1;
+            if t.mismatches <= 5 {
+                println!(
+                    "  MISMATCH poly {b} probe {p} ({px:e}, {py:e}): gpu {} oracle {}",
+                    exact_state_name(states[k]),
+                    exact_state_name(want)
+                );
+            }
+        }
+    }
+    t
+}
+
+fn to_arrays(polys: &[MultiPolyDef], probes: &[(f64, f64)]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    (
+        polys.iter().map(make_multipoly_wkb).collect(),
+        probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect(),
+    )
+}
+
+fn binary_arrays(poly_wkbs: &[Vec<u8>], probe_wkbs: &[Vec<u8>]) -> (ArrayRef, ArrayRef) {
+    let poly_slices: Vec<Option<&[u8]>> = poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    let probe_slices: Vec<Option<&[u8]>> = probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    (
+        Arc::new(BinaryArray::from(poly_slices)),
+        Arc::new(BinaryArray::from(probe_slices)),
+    )
+}
+
+/// Runs the pipeline and asserts the exact pass agrees with the f64 oracle on
+/// the uncertain residue. Also re-runs the exact pass over *all* candidate
+/// pairs as a stronger independent check.
+fn exact_check(
+    label: &str,
+    mode: i32,
+    polys: &[MultiPolyDef],
+    probes: &[(f64, f64)],
+    pairs: &[(u32, u32)],
+) -> ExactTally {
+    let (poly_wkbs, probe_wkbs) = to_arrays(polys, probes);
+    let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+    let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+    let run = run_exact_pipeline(mode, &poly_array, &probe_array, probes, &cand_b, &cand_p);
+    let residue = tally_against_oracle(&run.uncertain, &run.states, polys, probes);
+
+    println!(
+        "[EXACT {label}] pairs {} | verified {} | uncertain residue {} ({:.3}%) | Inside {} Outside {} Boundary {} NotDecided {} | mismatches {} | scale 2^{}",
+        pairs.len(),
+        run.verified_count,
+        run.uncertain.len(),
+        100.0 * run.uncertain.len() as f64 / pairs.len() as f64,
+        residue.inside,
+        residue.outside,
+        residue.boundary,
+        residue.not_decided,
+        residue.mismatches,
+        run.scale
+    );
+    println!(
+        "            timings ms: build_exact {:.2} | f32 {:.3} | prep_full {:.3} | prep_subset {:.3} | exact {:.3} || bytes: f32 {} exact {}",
+        run.t_build_exact_ms,
+        run.t_f32_ms,
+        run.t_prep_full_ms,
+        run.t_prep_subset_ms,
+        run.t_exact_ms,
+        run.f32_bytes,
+        run.exact_bytes
+    );
+    assert_eq!(
+        residue.mismatches, 0,
+        "{label}: exact pass disagreed with the f64 oracle on the uncertain residue"
+    );
+    assert_eq!(
+        run.polys_not_representable, 0,
+        "{label}: some polygons were not representable in the fixed-point frame"
+    );
+    residue
+}
+
+#[test]
+fn test_exact_gate_1_adversarial_residue() {
+    let (polys, probes, pairs) = generate_adversarial_suite(500_000.0, 500_000.0, 10_000.0, 42);
+    let t = exact_check("GATE 1", 0, &polys, &probes, &pairs);
+    assert!(
+        t.inside + t.outside + t.boundary > 0,
+        "Gate 1 must have a non-empty residue to decide"
+    );
+    assert_eq!(t.not_decided, 0);
+}
+
+#[test]
+fn test_exact_gate_1_all_pairs_not_just_residue() {
+    // Stronger than the task requires: decide every candidate pair exactly,
+    // not only the ones the f32 pass gave up on.
+    let (polys, probes, pairs) = generate_adversarial_suite(500_000.0, 500_000.0, 10_000.0, 42);
+    let (poly_wkbs, probe_wkbs) = to_arrays(&polys, &probes);
+    let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+    let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+    let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+    refiner.push_build_exact(&poly_array);
+    let (scale, _) = refiner.finish_exact().unwrap();
+    let fixed = flatten_probe_exact(&probe_array, scale);
+    let states = refiner.refine_exact(&fixed, &cand_b, &cand_p).unwrap();
+
+    let t = tally_against_oracle(&pairs, &states, &polys, &probes);
+    println!(
+        "[EXACT ALL-PAIRS] pairs {} | Inside {} Outside {} Boundary {} NotDecided {} | mismatches {}",
+        pairs.len(),
+        t.inside,
+        t.outside,
+        t.boundary,
+        t.not_decided,
+        t.mismatches
+    );
+    assert_eq!(t.mismatches, 0);
+    assert_eq!(t.not_decided, 0);
+    assert!(
+        t.boundary > 0,
+        "the adversarial suite contains on-edge probes"
+    );
+}
+
+#[test]
+fn test_exact_gate_2_scale_matrix() {
+    let centers = [1e2, 5e5, 1e7, -1e7];
+    let radii = [1e-3, 1.0, 1e3, 1e5, 1e6];
+    for &cx in &centers {
+        for &r in &radii {
+            let (polys, probes, pairs) = generate_adversarial_suite(cx, cx, r, 12345);
+            exact_check(
+                &format!("GATE 2 c={cx:+.0e} R={r:.0e}"),
+                0,
+                &polys,
+                &probes,
+                &pairs,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_exact_gate_7_high_magnitude() {
+    let (polys, probes, pairs) =
+        generate_adversarial_suite(10_000_000.0, 10_000_000.0, 100_000.0, 9999);
+    exact_check("GATE 7 mode 0", 0, &polys, &probes, &pairs);
+    // Mode 4 leaves a much larger residue, so this exercises the exact pass
+    // over a far wider slice of the same point set.
+    exact_check("GATE 7 mode 4", 4, &polys, &probes, &pairs);
+}
+
+#[test]
+fn test_exact_gate_8_spanning_shallow_edges() {
+    let scales: [f64; 4] = [1e2, 1e4, 1e6, 1e7];
+    let mut total_residue = 0usize;
+    for &center in &scales {
+        let (cx, cy) = (center, center);
+        let span = (center * 0.1f64).max(10.0);
+        let ulp_rel = (span as f32).next_up() as f64 - (span as f32) as f64;
+        let rise = 5e-6 * span;
+
+        for si in -8i32..=8 {
+            let v1y = cy + (si as f64) * 0.125 * ulp_rel;
+            let poly_def = MultiPolyDef {
+                parts: vec![PolyPart {
+                    rings: vec![vec![
+                        (cx - 1e-3 * span, v1y),
+                        (cx + 1.999 * span, v1y + rise),
+                        (cx + 1.999 * span, cy + span),
+                        (cx - 1e-3 * span, cy + span),
+                    ]],
+                }],
+            };
+            let probes: Vec<(f64, f64)> = (-40i32..=40)
+                .map(|j| (cx, v1y + (j as f64) * 0.05 * ulp_rel))
+                .collect();
+            let pairs: Vec<(u32, u32)> = (0..probes.len() as u32).map(|p| (0u32, p)).collect();
+
+            let (poly_wkbs, probe_wkbs) = to_arrays(std::slice::from_ref(&poly_def), &probes);
+            let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+            let (cb, cp): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+            let run = run_exact_pipeline(0, &poly_array, &probe_array, &probes, &cb, &cp);
+            let t = tally_against_oracle(
+                &run.uncertain,
+                &run.states,
+                std::slice::from_ref(&poly_def),
+                &probes,
+            );
+            total_residue += run.uncertain.len();
+            assert_eq!(t.mismatches, 0, "gate 8 scale {center:e} si {si}");
+            assert_eq!(t.not_decided, 0);
+        }
+    }
+    println!("[EXACT GATE 8] decided {total_residue} residue pairs across 4 scales, 0 mismatches");
+}
+
+#[test]
+fn test_exact_points_exactly_on_vertices_and_edges() {
+    // Integer-valued coordinates on a large offset: every vertex, every lattice
+    // point on an axis-aligned edge and every point on the 3-4-5 diagonal edge
+    // is *exactly* on the boundary in f64.
+    let cx = 1_048_576.0f64; // 2^20, so cx + small integers are exact
+    let cy = 2_097_152.0f64;
+    let ring = vec![
+        (cx, cy),
+        (cx + 400.0, cy),
+        (cx + 400.0, cy + 300.0),
+        (cx + 100.0, cy + 700.0), // slope -4/3 edge back to (cx, cy + 300)
+        (cx, cy + 300.0),
+    ];
+    let poly = MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![ring.clone()],
+        }],
+    };
+
+    let mut probes: Vec<(f64, f64)> = Vec::new();
+    let mut expect: Vec<u8> = Vec::new();
+
+    // every vertex
+    for &(vx, vy) in &ring {
+        probes.push((vx, vy));
+        expect.push(EXACT_BOUNDARY);
+    }
+    // lattice points on the four axis-aligned edges
+    for i in 1..400 {
+        probes.push((cx + i as f64, cy));
+        expect.push(EXACT_BOUNDARY);
+        probes.push((cx + 400.0, cy + (i % 300) as f64));
+        expect.push(EXACT_BOUNDARY);
+    }
+    for i in 1..300 {
+        probes.push((cx, cy + i as f64));
+        expect.push(EXACT_BOUNDARY);
+    }
+    // points on the exact diagonal (cx + 400, cy + 300) -> (cx + 100, cy + 700):
+    // direction (-3, +4); parameterise in steps of (−3, +4)
+    for k in 1..100 {
+        probes.push((cx + 400.0 - 3.0 * k as f64, cy + 300.0 + 4.0 * k as f64));
+        expect.push(EXACT_BOUNDARY);
+    }
+    // interior and exterior controls
+    for i in 1..50 {
+        probes.push((cx + 200.0, cy + i as f64));
+        expect.push(EXACT_INSIDE);
+        probes.push((cx + 500.0, cy + i as f64));
+        expect.push(EXACT_OUTSIDE);
+    }
+
+    let pairs: Vec<(u32, u32)> = (0..probes.len() as u32).map(|p| (0u32, p)).collect();
+    let (poly_wkbs, probe_wkbs) = to_arrays(std::slice::from_ref(&poly), &probes);
+    let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+    let (cb, cp): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+    let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+    refiner.push_build_exact(&poly_array);
+    let (scale, _) = refiner.finish_exact().unwrap();
+    let fixed = flatten_probe_exact(&probe_array, scale);
+    let states = refiner.refine_exact(&fixed, &cb, &cp).unwrap();
+
+    let mut wrong = 0usize;
+    for (k, &want) in expect.iter().enumerate() {
+        // cross-check the hand-written expectation against the oracle too
+        let (px, py) = probes[k];
+        assert_eq!(
+            oracle_state(exact_pip_oracle(&poly, px, py)),
+            want,
+            "hand-written expectation disagrees with oracle at probe {k}"
+        );
+        if states[k] != want {
+            wrong += 1;
+            if wrong <= 5 {
+                println!(
+                    "  on-boundary mismatch probe {k} ({px}, {py}): gpu {} want {}",
+                    exact_state_name(states[k]),
+                    exact_state_name(want)
+                );
+            }
+        }
+    }
+    let n_boundary = expect.iter().filter(|&&e| e == EXACT_BOUNDARY).count();
+    println!(
+        "[EXACT ON-BOUNDARY] probes {} ({} exactly on a vertex or edge) | mismatches {}",
+        probes.len(),
+        n_boundary,
+        wrong
+    );
+    assert_eq!(wrong, 0);
+}
+
+#[test]
+fn test_exact_random_realistic() {
+    let mut rng = SeededRng::new(20250920);
+    for &(cx, cy, r_poly) in &[
+        (500_000.0f64, 500_000.0f64, 10_000.0f64),
+        (-74.0f64, 40.7f64, 0.5f64),
+    ] {
+        for &n_verts in &[1_000usize, 10_000] {
+            let ring = generate_realistic_coastline_ring(cx, cy, r_poly, n_verts, &mut rng);
+            let poly = MultiPolyDef {
+                parts: vec![PolyPart { rings: vec![ring] }],
+            };
+            let probes: Vec<(f64, f64)> = (0..4_000)
+                .map(|_| {
+                    (
+                        cx + (rng.next_f64() * 3.0 - 1.5) * r_poly,
+                        cy + (rng.next_f64() * 3.0 - 1.5) * r_poly,
+                    )
+                })
+                .collect();
+            let pairs: Vec<(u32, u32)> = (0..probes.len() as u32).map(|p| (0u32, p)).collect();
+            let (poly_wkbs, probe_wkbs) = to_arrays(std::slice::from_ref(&poly), &probes);
+            let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+            let (cb, cp): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+            let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+            refiner.push_build(&poly_array).unwrap();
+            refiner.finish_building().unwrap();
+            refiner.push_build_exact(&poly_array);
+            let (scale, _) = refiner.finish_exact().unwrap();
+            let fixed = flatten_probe_exact(&probe_array, scale);
+            let states = refiner.refine_exact(&fixed, &cb, &cp).unwrap();
+            let t = tally_against_oracle(&pairs, &states, std::slice::from_ref(&poly), &probes);
+            println!(
+                "[EXACT REALISTIC] center ({cx}, {cy}) R {r_poly} n {n_verts} | all {} pairs | Inside {} Outside {} Boundary {} NotDecided {} | mismatches {}",
+                pairs.len(),
+                t.inside,
+                t.outside,
+                t.boundary,
+                t.not_decided,
+                t.mismatches
+            );
+            assert_eq!(t.mismatches, 0);
+            assert_eq!(t.not_decided, 0);
+        }
+    }
+}
+
+#[test]
+fn test_exact_vs_production_geos() {
+    use geos::{Geom, Geometry};
+
+    let (polys, probes, pairs) = generate_adversarial_suite(500_000.0, 500_000.0, 10_000.0, 7);
+    let (poly_wkbs, probe_wkbs) = to_arrays(&polys, &probes);
+    let (poly_array, probe_array) = binary_arrays(&poly_wkbs, &probe_wkbs);
+    let (cb, cp): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+    let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+    refiner.push_build_exact(&poly_array);
+    let (scale, _) = refiner.finish_exact().unwrap();
+    let fixed = flatten_probe_exact(&probe_array, scale);
+    let states = refiner.refine_exact(&fixed, &cb, &cp).unwrap();
+
+    let geoms: Vec<Geometry> = poly_wkbs
+        .iter()
+        .map(|w| Geometry::new_from_wkb(w).expect("geos wkb"))
+        .collect();
+    let prepared: Vec<_> = geoms
+        .iter()
+        .map(|g| g.to_prepared_geom().expect("geos prepare"))
+        .collect();
+
+    let mut mismatches = 0usize;
+    let mut counts = [0usize; 3];
+    for (k, &(b, p)) in pairs.iter().enumerate() {
+        let (px, py) = probes[p as usize];
+        let pg = &prepared[b as usize];
+        let inside = pg.contains_xy(px, py).unwrap();
+        let touching = pg.intersects_xy(px, py).unwrap();
+        let want = if inside {
+            EXACT_INSIDE
+        } else if touching {
+            EXACT_BOUNDARY
+        } else {
+            EXACT_OUTSIDE
+        };
+        counts[match want {
+            EXACT_INSIDE => 0,
+            EXACT_BOUNDARY => 1,
+            _ => 2,
+        }] += 1;
+        if states[k] != want {
+            mismatches += 1;
+            if mismatches <= 5 {
+                println!(
+                    "  GEOS mismatch poly {b} probe {p} ({px:e}, {py:e}): gpu {} geos {}",
+                    exact_state_name(states[k]),
+                    exact_state_name(want)
+                );
+            }
+        }
+    }
+    println!(
+        "[EXACT vs GEOS {}] pairs {} | GEOS says Inside {} Boundary {} Outside {} | mismatches {}",
+        geos::version().unwrap_or_default(),
+        pairs.len(),
+        counts[0],
+        counts[1],
+        counts[2],
+        mismatches
+    );
+    assert_eq!(
+        mismatches, 0,
+        "exact GPU pass disagreed with production GEOS"
+    );
+}
+
+#[test]
+fn test_exact_degenerate_inputs_and_not_decided() {
+    // (a) invalid / NaN / empty build rows and probe rows must come back as
+    //     NotDecided rather than as a wrong definite answer.
+    let valid = make_multipoly_wkb(&MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]],
+        }],
+    });
+    let nan_poly = make_multipoly_wkb(&MultiPolyDef {
+        parts: vec![PolyPart {
+            rings: vec![vec![
+                (f64::NAN, 0.0),
+                (10.0, 0.0),
+                (10.0, 10.0),
+                (0.0, 10.0),
+            ]],
+        }],
+    });
+    let empty_wkb = vec![1u8, 3, 0, 0, 0, 0, 0, 0, 0];
+    let degen = make_degenerate_poly_wkb(2);
+    let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![
+        Some(valid.as_slice()),
+        Some(nan_poly.as_slice()),
+        Some(empty_wkb.as_slice()),
+        Some(degen.as_slice()),
+        None,
+    ]));
+
+    let p_ok = make_point_wkb(5.0, 5.0);
+    let p_nan = make_point_wkb(f64::NAN, 5.0);
+    let p_inf = make_point_wkb(f64::INFINITY, 5.0);
+    let p_tiny = make_point_wkb(1e-300, 5.0);
+    let probe_array: ArrayRef = Arc::new(BinaryArray::from(vec![
+        Some(p_ok.as_slice()),
+        Some(p_nan.as_slice()),
+        Some(p_inf.as_slice()),
+        Some(p_tiny.as_slice()),
+    ]));
+
+    let cb = vec![0u32, 1, 2, 3, 4, 0, 0, 0, 99];
+    let cp = vec![0u32, 0, 0, 0, 0, 1, 2, 3, 0];
+
+    let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+    refiner.push_build(&poly_array).unwrap();
+    refiner.finish_building().unwrap();
+    refiner.push_build_exact(&poly_array);
+    let (scale, not_ok) = refiner.finish_exact().unwrap();
+    let fixed = flatten_probe_exact(&probe_array, scale);
+    let states = refiner.refine_exact(&fixed, &cb, &cp).unwrap();
+
+    println!(
+        "[EXACT DEGENERATE] scale 2^{scale} | polygons flagged not-representable {not_ok} | states {:?}",
+        states
+            .iter()
+            .map(|&s| exact_state_name(s))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(states[0], EXACT_INSIDE, "valid interior pair");
+    for (k, &state) in states.iter().enumerate().skip(1) {
+        assert_eq!(
+            state,
+            EXACT_NOT_DECIDED,
+            "degenerate pair {k} must be NotDecided, got {}",
+            exact_state_name(state)
+        );
+    }
+
+    // (b) a coordinate far below the frame's LSB is refused rather than rounded.
+    // scale here is 2^(exp(10) - 122) = 2^-119, so 1e-300 cannot be represented.
+    assert!(f64_to_fixed(1e-300, scale).is_none());
+    assert!(f64_to_fixed(1e300, scale).is_none());
+    assert_eq!(f64_to_fixed(0.0, scale), Some(0));
+}
+
+#[test]
+fn test_exact_fixed_point_roundtrip() {
+    // f64_to_fixed must be exact or refuse; it must never round.
+    let mut rng = SeededRng::new(5150);
+    let scale = -60i32;
+    let mut exact = 0usize;
+    let mut refused = 0usize;
+    for _ in 0..200_000 {
+        let v = (rng.next_f64() * 2.0 - 1.0) * 1e6;
+        match f64_to_fixed(v, scale) {
+            Some(i) => {
+                // reconstruct: i * 2^scale must equal v bit for bit
+                let back = (i as f64) * 2f64.powi(scale);
+                assert_eq!(back.to_bits(), v.to_bits(), "roundtrip failed for {v:e}");
+                exact += 1;
+            }
+            None => refused += 1,
+        }
+    }
+    println!(
+        "[EXACT FIXED-POINT] 200000 samples at scale 2^{scale}: {exact} exact, {refused} refused"
+    );
+    assert_eq!(refused, 0, "all 1e6-scale doubles should fit at 2^-60");
+}
+
+/// Boundary-heavy probe generator: lands points inside the f32 kernel's
+/// uncertainty band around random edge points, which is what drives the
+/// uncertain rate to the 15-40% regime.
+fn generate_boundary_heavy_probes(
+    ring: &[(f64, f64)],
+    n: usize,
+    r_poly: f64,
+    rng: &mut SeededRng,
+) -> Vec<(f64, f64)> {
+    let eta_k = 4.0 * 5.9604645e-8 * r_poly;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let i = (rng.next_u64() as usize) % ring.len();
+        let (ax, ay) = ring[i];
+        let (bx, by) = ring[(i + 1) % ring.len()];
+        let t = rng.next_f64();
+        let (mx, my) = (ax + t * (bx - ax), ay + t * (by - ay));
+        let (dx, dy) = (bx - ax, by - ay);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len == 0.0 {
+            out.push((mx, my));
+            continue;
+        }
+        // Offsets span several multiples of the certified band so that only a
+        // fraction of the probes end up genuinely uncertain. The kernel's
+        // effective half-width is roughly 10x this eta_k estimate, so a +/-30x
+        // spread lands about a quarter of the probes in the uncertain band.
+        let k = (rng.next_f64() * 2.0 - 1.0) * 30.0;
+        out.push((mx + k * eta_k * (-dy / len), my + k * eta_k * (dx / len)));
+    }
+    out
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+#[test]
+#[ignore]
+fn test_exact_timing_matrix() {
+    use geos::{Geom, Geometry};
+
+    const RUNS: usize = 11;
+    const WARMUP: usize = 3;
+    let num_probes = 5_000usize;
+    let (cx, cy, r_poly) = (500_000.0f64, 500_000.0f64, 10_000.0f64);
+    let mut rng = SeededRng::new(31337);
+
+    println!("\n{:=<168}", "");
+    println!(
+        " EXACT GPU SECOND PASS vs CPU: {num_probes} candidate pairs per run, median of {} timed runs after {WARMUP} warmups, Apple M4",
+        RUNS - WARMUP
+    );
+    println!(
+        " f32-all: f32 kernel over all pairs. f32-res: same f32 kernel re-dispatched over only the residue (isolates dispatch shape from exact arithmetic)."
+    );
+    println!(
+        " geos-res: GEOS prepared contains_xy over the residue. geos-all: GEOS prepared over all pairs (CPU-only baseline, no GPU at all)."
+    );
+    println!("{:=<168}", "");
+    println!(
+        "{:<12} | {:<8} | {:>7} | {:>6} | {:>8} | {:>8} | {:>8} | {:>8} | {:>9} | {:>9} | {:>9} | {:>9} | {:>8}",
+        "workload",
+        "vertices",
+        "uncert",
+        "rate%",
+        "f32-all",
+        "f32-res",
+        "prep",
+        "exact",
+        "gpu total",
+        "geos-res",
+        "gpu+geos",
+        "geos-all",
+        "build"
+    );
+    println!("{:-<168}", "");
+
+    for &n_verts in &[1_000usize, 10_000, 100_000] {
+        let ring = generate_realistic_coastline_ring(cx, cy, r_poly, n_verts, &mut rng);
+        let poly = MultiPolyDef {
+            parts: vec![PolyPart {
+                rings: vec![ring.clone()],
+            }],
+        };
+        let poly_wkb = make_multipoly_wkb(&poly);
+        let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+
+        let realistic: Vec<(f64, f64)> = (0..num_probes)
+            .map(|_| {
+                (
+                    cx + (rng.next_f64() * 3.0 - 1.5) * r_poly,
+                    cy + (rng.next_f64() * 3.0 - 1.5) * r_poly,
+                )
+            })
+            .collect();
+        let adversarial = generate_boundary_heavy_probes(&ring, num_probes, r_poly, &mut rng);
+
+        let geos_poly = Geometry::new_from_wkb(&poly_wkb).unwrap();
+        let t_prep_geos = Instant::now();
+        let geos_prepared = geos_poly.to_prepared_geom().unwrap();
+        // force the prepared index to be materialised
+        let _ = geos_prepared.contains_xy(cx, cy).unwrap();
+        let geos_prepare_ms = t_prep_geos.elapsed().as_secs_f64() * 1000.0;
+
+        for &(workload, mode, probes) in &[
+            ("realistic", 0i32, &realistic),
+            ("adversarial", 0i32, &adversarial),
+            ("forced(m4)", 4i32, &realistic),
+        ] {
+            let probe_wkbs: Vec<Vec<u8>> =
+                probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+            let probe_slices: Vec<Option<&[u8]>> =
+                probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+            let cb = vec![0u32; num_probes];
+            let cp: Vec<u32> = (0..num_probes as u32).collect();
+
+            let mut refiner = MetalSpatialRefiner::try_new_with_mode(mode).unwrap();
+            refiner.push_build(&poly_array).unwrap();
+            refiner.finish_building().unwrap();
+            let t_be = Instant::now();
+            refiner.push_build_exact(&poly_array);
+            let (scale, _) = refiner.finish_exact().unwrap();
+            let build_exact_ms = t_be.elapsed().as_secs_f64() * 1000.0;
+
+            let mut f32_ms = Vec::new();
+            let mut f32res_ms = Vec::new();
+            let mut prep_ms = Vec::new();
+            let mut exact_ms = Vec::new();
+            let mut geos_ms = Vec::new();
+            let mut geosall_ms = Vec::new();
+            let mut n_unc = 0usize;
+
+            for run in 0..RUNS {
+                let (mut vb, mut vp, mut ub, mut up) = (vec![], vec![], vec![], vec![]);
+                let t0 = Instant::now();
+                refiner
+                    .refine(
+                        &probe_array,
+                        ContainerSide::Build,
+                        &cb,
+                        &cp,
+                        &mut vb,
+                        &mut vp,
+                        &mut ub,
+                        &mut up,
+                    )
+                    .unwrap();
+                let dt_f32 = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t1 = Instant::now();
+                let dense: Vec<FixedProbe> = up
+                    .iter()
+                    .map(|&p| {
+                        let (x, y) = probes[p as usize];
+                        fixed_probe_from_coord(x, y, scale)
+                    })
+                    .collect();
+                let dense_idx: Vec<u32> = (0..dense.len() as u32).collect();
+                let dt_prep = t1.elapsed().as_secs_f64() * 1000.0;
+
+                let t2 = Instant::now();
+                let _states = refiner.refine_exact(&dense, &ub, &dense_idx).unwrap();
+                let dt_exact = t2.elapsed().as_secs_f64() * 1000.0;
+
+                // Same dispatch shape, f32 kernel: isolates "few threads over a
+                // long ring" from "128-bit arithmetic".
+                let (mut xb, mut xp, mut yb, mut yp) = (vec![], vec![], vec![], vec![]);
+                let t2b = Instant::now();
+                refiner
+                    .refine(
+                        &probe_array,
+                        ContainerSide::Build,
+                        &ub,
+                        &up,
+                        &mut xb,
+                        &mut xp,
+                        &mut yb,
+                        &mut yp,
+                    )
+                    .unwrap();
+                let dt_f32res = t2b.elapsed().as_secs_f64() * 1000.0;
+
+                let t3 = Instant::now();
+                let mut acc = 0usize;
+                for &p in up.iter() {
+                    let (x, y) = probes[p as usize];
+                    if geos_prepared.contains_xy(x, y).unwrap() {
+                        acc += 1;
+                    }
+                }
+                let dt_geos = t3.elapsed().as_secs_f64() * 1000.0;
+
+                let t4 = Instant::now();
+                for &(x, y) in probes.iter() {
+                    if geos_prepared.contains_xy(x, y).unwrap() {
+                        acc += 1;
+                    }
+                }
+                let dt_geos_all = t4.elapsed().as_secs_f64() * 1000.0;
+                std::hint::black_box(acc);
+
+                if run >= WARMUP {
+                    f32_ms.push(dt_f32);
+                    f32res_ms.push(dt_f32res);
+                    prep_ms.push(dt_prep);
+                    exact_ms.push(dt_exact);
+                    geos_ms.push(dt_geos);
+                    geosall_ms.push(dt_geos_all);
+                }
+                n_unc = ub.len();
+            }
+
+            let m_f32 = median(f32_ms);
+            let m_f32res = median(f32res_ms);
+            let m_prep = median(prep_ms);
+            let m_exact = median(exact_ms);
+            let m_geos = median(geos_ms);
+            let m_geos_all = median(geosall_ms);
+            println!(
+                "{:<12} | {:<8} | {:>7} | {:>5.2}% | {:>8.3} | {:>8.3} | {:>8.3} | {:>8.3} | {:>9.3} | {:>9.3} | {:>9.3} | {:>9.3} | {:>8.2}",
+                workload,
+                n_verts,
+                n_unc,
+                100.0 * n_unc as f64 / num_probes as f64,
+                m_f32,
+                m_f32res,
+                m_prep,
+                m_exact,
+                m_f32 + m_prep + m_exact,
+                m_geos,
+                m_f32 + m_geos,
+                m_geos_all,
+                build_exact_ms
+            );
+        }
+        println!(
+            "{:-<152}   (GEOS prepare for {n_verts} vertices: {geos_prepare_ms:.2} ms, one-time)",
+            ""
+        );
+    }
+}
+
+/// Join-shaped workload: many polygons, many probes, so that even a small
+/// uncertain fraction still fills the GPU. This is the configuration in which
+/// an on-GPU exact pass has any chance of beating the CPU hop.
+#[test]
+#[ignore]
+fn test_exact_join_shaped_benchmark() {
+    use geos::{Geom, Geometry};
+
+    const RUNS: usize = 11;
+    const WARMUP: usize = 3;
+    let mut rng = SeededRng::new(987_654);
+
+    println!("\n{:=<150}", "");
+    println!(" JOIN-SHAPED WORKLOAD: many polygons x many probes (one candidate pair per probe)");
+    println!("{:=<150}", "");
+    println!(
+        "{:<8} | {:<8} | {:<8} | {:<12} | {:>7} | {:>6} | {:>9} | {:>8} | {:>8} | {:>10} | {:>9} | {:>9}",
+        "polys",
+        "verts",
+        "probes",
+        "workload",
+        "uncert",
+        "rate%",
+        "f32-all",
+        "prep",
+        "exact",
+        "gpu total",
+        "geos-res",
+        "geos-all"
+    );
+    println!("{:-<150}", "");
+
+    for &(n_polys, n_verts, n_probes) in
+        &[(500usize, 500usize, 100_000usize), (2_000, 200, 200_000)]
+    {
+        let mut polys = Vec::with_capacity(n_polys);
+        let mut rings = Vec::with_capacity(n_polys);
+        for i in 0..n_polys {
+            let cx = 400_000.0 + (i % 50) as f64 * 5_000.0;
+            let cy = 400_000.0 + (i / 50) as f64 * 5_000.0;
+            let ring = generate_realistic_coastline_ring(cx, cy, 2_000.0, n_verts, &mut rng);
+            rings.push((cx, cy, ring.clone()));
+            polys.push(MultiPolyDef {
+                parts: vec![PolyPart { rings: vec![ring] }],
+            });
+        }
+        let poly_wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
+        let poly_slices: Vec<Option<&[u8]>> =
+            poly_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+        let poly_array: ArrayRef = Arc::new(BinaryArray::from(poly_slices));
+
+        let geoms: Vec<Geometry> = poly_wkbs
+            .iter()
+            .map(|w| Geometry::new_from_wkb(w).unwrap())
+            .collect();
+        let prepared: Vec<_> = geoms
+            .iter()
+            .map(|g| g.to_prepared_geom().unwrap())
+            .collect();
+        for (i, p) in prepared.iter().enumerate() {
+            let _ = p.contains_xy(rings[i].0, rings[i].1).unwrap();
+        }
+
+        for workload in ["realistic", "adversarial"] {
+            let mut probe_coords = Vec::with_capacity(n_probes);
+            let mut assign = Vec::with_capacity(n_probes);
+            for _ in 0..n_probes {
+                let pi = (rng.next_u64() as usize) % n_polys;
+                let (cx, cy, ref ring) = rings[pi];
+                let p = if workload == "realistic" {
+                    (
+                        cx + (rng.next_f64() * 6.0 - 3.0) * 1_000.0,
+                        cy + (rng.next_f64() * 6.0 - 3.0) * 1_000.0,
+                    )
+                } else {
+                    generate_boundary_heavy_probes(ring, 1, 2_000.0, &mut rng)[0]
+                };
+                probe_coords.push(p);
+                assign.push(pi as u32);
+            }
+            let probe_wkbs: Vec<Vec<u8>> = probe_coords
+                .iter()
+                .map(|&(x, y)| make_point_wkb(x, y))
+                .collect();
+            let probe_slices: Vec<Option<&[u8]>> =
+                probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+            let cp: Vec<u32> = (0..n_probes as u32).collect();
+
+            let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+            refiner.push_build(&poly_array).unwrap();
+            refiner.finish_building().unwrap();
+            refiner.push_build_exact(&poly_array);
+            let (scale, _) = refiner.finish_exact().unwrap();
+
+            let (mut f32_ms, mut prep_ms, mut exact_ms) = (vec![], vec![], vec![]);
+            let (mut geos_ms, mut geosall_ms) = (vec![], vec![]);
+            let mut n_unc = 0usize;
+
+            for run in 0..RUNS {
+                let (mut vb, mut vp, mut ub, mut up) = (vec![], vec![], vec![], vec![]);
+                let t0 = Instant::now();
+                refiner
+                    .refine(
+                        &probe_array,
+                        ContainerSide::Build,
+                        &assign,
+                        &cp,
+                        &mut vb,
+                        &mut vp,
+                        &mut ub,
+                        &mut up,
+                    )
+                    .unwrap();
+                let dt_f32 = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t1 = Instant::now();
+                let dense: Vec<FixedProbe> = up
+                    .iter()
+                    .map(|&p| {
+                        let (x, y) = probe_coords[p as usize];
+                        fixed_probe_from_coord(x, y, scale)
+                    })
+                    .collect();
+                let dense_idx: Vec<u32> = (0..dense.len() as u32).collect();
+                let dt_prep = t1.elapsed().as_secs_f64() * 1000.0;
+
+                let t2 = Instant::now();
+                let _ = refiner.refine_exact(&dense, &ub, &dense_idx).unwrap();
+                let dt_exact = t2.elapsed().as_secs_f64() * 1000.0;
+
+                let t3 = Instant::now();
+                let mut acc = 0usize;
+                for (bi, &p) in ub.iter().zip(up.iter()) {
+                    let (x, y) = probe_coords[p as usize];
+                    if prepared[*bi as usize].contains_xy(x, y).unwrap() {
+                        acc += 1;
+                    }
+                }
+                let dt_geos = t3.elapsed().as_secs_f64() * 1000.0;
+
+                let t4 = Instant::now();
+                for (k, &(x, y)) in probe_coords.iter().enumerate() {
+                    if prepared[assign[k] as usize].contains_xy(x, y).unwrap() {
+                        acc += 1;
+                    }
+                }
+                let dt_geos_all = t4.elapsed().as_secs_f64() * 1000.0;
+                std::hint::black_box(acc);
+
+                if run >= WARMUP {
+                    f32_ms.push(dt_f32);
+                    prep_ms.push(dt_prep);
+                    exact_ms.push(dt_exact);
+                    geos_ms.push(dt_geos);
+                    geosall_ms.push(dt_geos_all);
+                }
+                n_unc = ub.len();
+            }
+
+            let (m_f32, m_prep, m_exact) = (median(f32_ms), median(prep_ms), median(exact_ms));
+            println!(
+                "{:<8} | {:<8} | {:<8} | {:<12} | {:>7} | {:>5.2}% | {:>9.3} | {:>8.3} | {:>8.3} | {:>10.3} | {:>9.3} | {:>9.3}",
+                n_polys,
+                n_verts,
+                n_probes,
+                workload,
+                n_unc,
+                100.0 * n_unc as f64 / n_probes as f64,
+                m_f32,
+                m_prep,
+                m_exact,
+                m_f32 + m_prep + m_exact,
+                median(geos_ms),
+                median(geosall_ms)
+            );
+        }
+        println!("{:-<150}", "");
+    }
+}
+
+#[test]
+#[ignore]
+fn test_exact_memory_report() {
+    let mut rng = SeededRng::new(4242);
+    println!("\n{:-<110}", "");
+    println!(
+        "{:<12} | {:>14} | {:>14} | {:>14} | {:>12} | {:>12}",
+        "vertices", "f32 bytes", "exact bytes", "total bytes", "B/vtx f32", "B/vtx exact"
+    );
+    println!("{:-<110}", "");
+    for &n_verts in &[1_000usize, 10_000, 100_000] {
+        let ring =
+            generate_realistic_coastline_ring(500_000.0, 500_000.0, 10_000.0, n_verts, &mut rng);
+        let poly = MultiPolyDef {
+            parts: vec![PolyPart { rings: vec![ring] }],
+        };
+        let poly_wkb = make_multipoly_wkb(&poly);
+        let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+
+        let mut refiner = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+        refiner.push_build(&poly_array).unwrap();
+        refiner.finish_building().unwrap();
+        refiner.push_build_exact(&poly_array);
+        refiner.finish_exact().unwrap();
+
+        let f32_bytes = refiner.get_memory_usage();
+        let exact_bytes = refiner.exact_memory_usage();
+        println!(
+            "{:<12} | {:>14} | {:>14} | {:>14} | {:>12.2} | {:>12.2}",
+            n_verts,
+            f32_bytes,
+            exact_bytes,
+            f32_bytes + exact_bytes,
+            f32_bytes as f64 / n_verts as f64,
+            exact_bytes as f64 / n_verts as f64
+        );
+    }
+    println!("{:-<110}", "");
+    println!(
+        "probe buffer: DecomposedPoint {} B/point (f32 pass), FixedProbe {} B/point (exact pass)",
+        std::mem::size_of::<sedona_metalspatial::flattener::DecomposedPoint>(),
+        std::mem::size_of::<FixedProbe>()
     );
 }

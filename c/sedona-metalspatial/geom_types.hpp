@@ -120,3 +120,24 @@ struct DecomposedPoint {
   uint32_t is_valid;  // 1 if point is valid, 0 if empty/NaN/invalid
   uint32_t _padding;
 };
+
+// --- PROTOTYPE: exact second-stage resolver (measurement only) ---
+// States emitted by point_in_polygon_exact.
+#define EXACT_OUTSIDE 0
+#define EXACT_INSIDE 1
+#define EXACT_BOUNDARY 3
+#define EXACT_NOT_DECIDED 4
+
+// Exact 128-bit fixed-point vertex at the batch-global scale 2^L.
+struct FixedVertex {
+  uint32_t x[4];
+  uint32_t y[4];
+};
+
+// Exact 128-bit fixed-point probe point at the batch-global scale 2^L.
+struct FixedProbe {
+  uint32_t x[4];
+  uint32_t y[4];
+  uint32_t is_exact;
+  uint32_t _padding;
+};

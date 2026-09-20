@@ -49,6 +49,16 @@ int SedonaMetalRefinerRefine(void* refiner, const void* points, uint32_t point_c
                              const uint32_t* candidate_build_indices,
                              const uint32_t* candidate_probe_indices,
                              uint32_t candidate_count, uint8_t* out_states);
+#ifdef ENABLE_TEST_INTERNALS
+// PROTOTYPE: exact second-stage resolver (measurement only)
+int SedonaMetalRefinerFinishExact(void* refiner, const void* vertices, uint32_t vertex_count,
+                                  const uint32_t* poly_exact_ok, uint32_t poly_count);
+int SedonaMetalRefinerRefineExact(void* refiner, const void* points, uint32_t point_count,
+                                  const uint32_t* candidate_build_indices,
+                                  const uint32_t* candidate_probe_indices,
+                                  uint32_t candidate_count, uint8_t* out_states);
+uint64_t SedonaMetalRefinerGetExactMemUsage(void* refiner);
+#endif
 int SedonaMetalRefinerClear(void* refiner);
 void SedonaMetalRefinerFree(void* refiner);
 const char* SedonaMetalRefinerGetLastError(void* refiner);

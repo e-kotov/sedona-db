@@ -22,6 +22,7 @@ fn generate_shader_header() {
     let hash_src =
         fs::read_to_string("spatial_hash.metal").expect("Failed to read spatial_hash.metal");
     let refine_src = fs::read_to_string("refine.metal").unwrap_or_default();
+    let refine_exact_src = fs::read_to_string("refine_exact.metal").unwrap_or_default();
 
     let header_content = format!(
         r#"// Licensed to the Apache Software Foundation (ASF) under one
@@ -55,8 +56,12 @@ static const char* SPATIAL_HASH_METAL_SOURCE = R"RAW_SHADER(
 static const char* REFINE_METAL_SOURCE = R"RAW_SHADER(
 {}
 )RAW_SHADER";
+
+static const char* REFINE_EXACT_METAL_SOURCE = R"RAW_SHADER(
+{}
+)RAW_SHADER";
 "#,
-        bvh_src, hash_src, refine_src
+        bvh_src, hash_src, refine_src, refine_exact_src
     );
 
     fs::write("metal_shaders.h", header_content).expect("Failed to write metal_shaders.h");
@@ -73,6 +78,7 @@ fn main() {
     println!("cargo:rerun-if-changed=box_intersection.metal");
     println!("cargo:rerun-if-changed=bvh.metal");
     println!("cargo:rerun-if-changed=refine.metal");
+    println!("cargo:rerun-if-changed=refine_exact.metal");
     println!("cargo:rerun-if-changed=spatial_hash.metal");
 
     generate_shader_header();
