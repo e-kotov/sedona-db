@@ -117,6 +117,11 @@ impl PlatformSpatialRefiner {
     ) -> Result<RefineOutcome> {
         match predicate {
             SpatialPredicate::Relation(rel_p) => {
+                let is_rejection_only = matches!(
+                    &rel_p.relation_type,
+                    SpatialRelationType::Touches | SpatialRelationType::Equals
+                );
+
                 let container = match &rel_p.relation_type {
                     SpatialRelationType::Contains | SpatialRelationType::Covers => {
                         ContainerSide::Build
@@ -124,7 +129,9 @@ impl PlatformSpatialRefiner {
                     SpatialRelationType::Within | SpatialRelationType::CoveredBy => {
                         ContainerSide::Probe
                     }
-                    SpatialRelationType::Intersects => ContainerSide::Either,
+                    SpatialRelationType::Intersects
+                    | SpatialRelationType::Touches
+                    | SpatialRelationType::Equals => ContainerSide::Either,
                     other => {
                         return Err(DataFusionError::Plan(format!(
                             "Spatial relation {:?} is not supported by Metal refiner",
@@ -153,6 +160,18 @@ impl PlatformSpatialRefiner {
                         DataFusionError::Execution(format!("Metal spatial refinement failed: {e}"))
                     })?;
 
+                // For Touches and Equals, the GPU serves as a pure rejection filter:
+                // - A certified Inside point lies strictly in the polygon's interior, so Touches(poly, pt) is false.
+                // - Equals(point, polygon) is always false due to dimension mismatch.
+                // - Certified Outside pairs are already discarded by the GPU kernel.
+                // - Only Uncertain pairs (boundary/near-boundary or unsupported geometries) can possibly
+                //   satisfy Touches or Equals; discarding verified pairs ensures zero false positives on GPU
+                //   while forwarding all plausible candidates to exact CPU GEOS evaluation.
+                if is_rejection_only {
+                    verified_build.clear();
+                    verified_probe.clear();
+                }
+
                 Ok(RefineOutcome {
                     verified_build,
                     verified_probe,
@@ -174,6 +193,8 @@ impl PlatformSpatialRefiner {
                 | SpatialRelationType::Within
                 | SpatialRelationType::CoveredBy
                 | SpatialRelationType::Intersects
+                | SpatialRelationType::Touches
+                | SpatialRelationType::Equals
         )
     }
 

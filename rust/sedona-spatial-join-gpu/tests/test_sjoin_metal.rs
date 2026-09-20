@@ -28,8 +28,6 @@ use datafusion::{
 };
 use datafusion_common::Result;
 use sedona_common::SedonaOptions;
-use sedona_functions;
-use sedona_geos;
 use sedona_query_planner::{
     optimizer::register_spatial_join_logical_optimizer, query_planner::SedonaQueryPlanner,
 };
@@ -455,6 +453,12 @@ async fn test_metal_coordinate_scales() -> Result<()> {
         "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Covers(L.geometry, R.geometry) ORDER BY l_id, r_id",
         10,
     ).await?;
+    assert_differential_query(
+        geo_left.clone(),
+        geo_right.clone(),
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
 
     // Projected EPSG:3857 coordinates (~1e6-1e7)
     let proj_polygons = vec![
@@ -478,6 +482,12 @@ async fn test_metal_coordinate_scales() -> Result<()> {
         proj_left.clone(),
         proj_right.clone(),
         "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Covers(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+    assert_differential_query(
+        proj_left.clone(),
+        proj_right.clone(),
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id",
         10,
     ).await?;
 
@@ -565,20 +575,19 @@ async fn test_metal_multiple_probe_batches_slicing() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Planner Fallback: ST_Touches
+// 8. Planner Fallback: ST_Crosses (unsupported predicate falls back to CPU)
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_metal_planner_fallback() -> Result<()> {
     let polygons = vec![(0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"))];
-    let points = vec![
-        (0, Some("POINT (0 5)")), // touches edge
-        (1, Some("POINT (5 5)")), // inside (does not touch)
+    let lines = vec![
+        (0, Some("LINESTRING (-5 5, 15 5)")), // crosses polygon
     ];
 
     let left = create_table(&polygons, 10)?;
-    let right = create_table(&points, 10)?;
+    let right = create_table(&lines, 10)?;
 
-    let sql = "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id";
+    let sql = "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Crosses(L.geometry, R.geometry) ORDER BY l_id, r_id";
 
     // 1. With fallback_to_cpu = true, query MUST succeed and match CPU oracle
     assert_differential_query_opts(left.clone(), right.clone(), sql, 10, true, false).await?;
@@ -596,6 +605,427 @@ async fn test_metal_planner_fallback() -> Result<()> {
         "Expected unsupported predicate error, got: {}",
         err_msg
     );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 9. ST_Touches: Point vs Polygon edge, vertex, hole, interior, exterior, 1-ulp, MultiPolygon
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_metal_touches_point_vs_polygon() -> Result<()> {
+    // Polygon with hole: outer [0, 20] x [0, 20], hole [5, 15] x [5, 15]
+    // MultiPolygon: part1 [30, 40] x [0, 10], part2 [40, 50] x [0, 10] sharing edge x=40
+    let polygons = vec![
+        (
+            0,
+            Some("POLYGON ((0 0, 20 0, 20 20, 0 20, 0 0), (5 5, 15 5, 15 15, 5 15, 5 5))"),
+        ),
+        (
+            1,
+            Some(
+                "MULTIPOLYGON (((30 0, 40 0, 40 10, 30 10, 30 0)), ((40 0, 50 0, 50 10, 40 10, 40 0)))",
+            ),
+        ),
+    ];
+
+    let ulp_down = 20.0f64.next_down();
+    let ulp_up = 20.0f64.next_up();
+    let pt_ulp_down = format!("POINT ({:.16} 10)", ulp_down);
+    let pt_ulp_up = format!("POINT ({:.16} 10)", ulp_up);
+
+    let points = vec![
+        (0, Some("POINT (0 10)")),       // on outer edge of poly 0 -> Touches
+        (1, Some("POINT (0 0)")),        // on outer vertex of poly 0 -> Touches
+        (2, Some("POINT (5 10)")),       // on hole boundary of poly 0 -> Touches
+        (3, Some("POINT (15 15)")),      // on hole vertex of poly 0 -> Touches
+        (4, Some("POINT (2 2)")),        // strictly interior -> Does NOT touch
+        (5, Some("POINT (10 10)")),      // in hole (exterior) -> Does NOT touch
+        (6, Some("POINT (25 25)")),      // strictly exterior -> Does NOT touch
+        (7, Some(pt_ulp_down.as_str())), // 1 ulp inside outer edge x=20 -> interior, Does NOT touch
+        (8, Some(pt_ulp_up.as_str())), // 1 ulp outside outer edge x=20 -> exterior, Does NOT touch
+        (9, Some("POINT (40 5)")),     // on shared boundary of MultiPolygon 1 -> Touches
+        (10, Some("POINT (35 5)")),    // interior of part 1 -> Does NOT touch
+    ];
+
+    let left = create_table(&polygons, 10)?;
+    let right = create_table(&points, 10)?;
+
+    let (metrics, _) = assert_differential_query(
+        left,
+        right,
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+
+    assert_eq!(
+        get_metric_count(&metrics, "gpu_verified"),
+        0,
+        "ST_Touches must emit zero verified pairs from GPU"
+    );
+    assert!(
+        get_metric_count(&metrics, "cpu_resolved") > 0,
+        "ST_Touches must resolve true boundary matches on CPU"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 10. ST_Touches: Mixed geometry batches (lines, polygons, multipoint on probe)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_metal_touches_mixed_geometry_batches() -> Result<()> {
+    let polygons = vec![(0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"))];
+    let probe_geoms = vec![
+        (0, Some("POINT (0 5)")),                                // touches boundary
+        (1, Some("POINT (5 5)")),                                // interior -> no touch
+        (2, Some("LINESTRING (-5 5, 0 5)")), // line touches outer boundary at (0, 5)
+        (3, Some("LINESTRING (2 2, 8 8)")),  // line strictly inside -> no touch
+        (4, Some("POLYGON ((10 0, 20 0, 20 10, 10 10, 10 0))")), // adjacent polygon touches edge
+        (5, Some("POLYGON ((2 2, 8 2, 8 8, 2 8, 2 2))")), // interior polygon -> no touch
+        (6, Some("MULTIPOINT ((0 5), (100 100))")), // touches at (0, 5)
+        (7, Some("MULTIPOINT ((5 5), (100 100))")), // interior -> no touch
+        (8, Some("POINT (15 15)")),          // exterior -> no touch
+    ];
+
+    let left = create_table(&polygons, 10)?;
+    let right = create_table(&probe_geoms, 10)?;
+
+    let (metrics, _) = assert_differential_query(
+        left,
+        right,
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Touches(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+
+    assert_eq!(
+        get_metric_count(&metrics, "gpu_verified"),
+        0,
+        "ST_Touches with mixed geometries must emit zero verified pairs from GPU"
+    );
+    assert!(
+        get_metric_count(&metrics, "cpu_resolved") > 0,
+        "ST_Touches with mixed geometries must resolve matches via CPU"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 11. ST_Equals: Point vs Polygon, Point vs Point, Polygon vs Polygon (Invariant C)
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_metal_equals() -> Result<()> {
+    // 1. Point vs Polygon: always empty
+    let poly_table = create_table(&[(0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"))], 10)?;
+    let pt_table = create_table(&[(0, Some("POINT (5 5)")), (1, Some("POINT (0 0)"))], 10)?;
+
+    let (metrics_pt_poly, _) = assert_differential_query(
+        poly_table,
+        pt_table,
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Equals(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+    assert_eq!(get_metric_count(&metrics_pt_poly, "gpu_verified"), 0);
+
+    // 2. Point vs Point: equal points match, non-equal do not
+    let pts_left = create_table(&[(0, Some("POINT (5 5)")), (1, Some("POINT (10 10)"))], 10)?;
+    let pts_right = create_table(&[(0, Some("POINT (5 5)")), (1, Some("POINT (20 20)"))], 10)?;
+
+    let (metrics_pt_pt, _) = assert_differential_query(
+        pts_left,
+        pts_right,
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Equals(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+    assert_eq!(get_metric_count(&metrics_pt_pt, "gpu_verified"), 0);
+    assert_eq!(get_metric_count(&metrics_pt_pt, "cpu_resolved"), 1);
+
+    // 3. Polygon vs Polygon: equal polygons match
+    let poly_left = create_table(
+        &[
+            (0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))")),
+            (1, Some("POLYGON ((20 20, 30 20, 30 30, 20 30, 20 20))")),
+        ],
+        10,
+    )?;
+    let poly_right = create_table(
+        &[
+            (0, Some("POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))")),
+            (1, Some("POLYGON ((50 50, 60 50, 60 60, 50 60, 50 50))")),
+        ],
+        10,
+    )?;
+
+    let (metrics_poly_poly, _) = assert_differential_query(
+        poly_left,
+        poly_right,
+        "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Equals(L.geometry, R.geometry) ORDER BY l_id, r_id",
+        10,
+    ).await?;
+    assert_eq!(get_metric_count(&metrics_poly_poly, "gpu_verified"), 0);
+    assert_eq!(get_metric_count(&metrics_poly_poly, "cpu_resolved"), 1);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 12. End-to-End Production CPU Cost & Timing Benchmark (10 Repeats, Real CPU Refiner)
+// ---------------------------------------------------------------------------
+fn make_coastline_polygon_wkt(cx: f64, cy: f64, r: f64, n: usize, seed: u64) -> String {
+    use std::fmt::Write;
+    let mut wkt = String::with_capacity(n * 28 + 64);
+    wkt.push_str("POLYGON ((");
+    let mut state = seed;
+    let mut next_f64 = || {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((state >> 11) as f64) / 9007199254740992.0
+    };
+    let mut phases = [0.0f64; 16];
+    let mut amps = [0.0f64; 16];
+    for k in 1..16 {
+        phases[k] = next_f64() * std::f64::consts::TAU;
+        amps[k] = (0.2 / (k as f64).powf(0.7)) * (0.8 + 0.4 * next_f64());
+    }
+    let mut first_pt = (0.0, 0.0);
+    for i in 0..n {
+        let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+        let mut rad_scale = 1.0;
+        for k in 1..16 {
+            rad_scale += amps[k] * (k as f64 * theta + phases[k]).cos();
+        }
+        let rad = r * rad_scale.max(0.2);
+        let px = cx + rad * theta.cos();
+        let py = cy + rad * theta.sin();
+        if i == 0 {
+            first_pt = (px, py);
+        } else {
+            wkt.push_str(", ");
+        }
+        write!(&mut wkt, "{:.6} {:.6}", px, py).unwrap();
+    }
+    write!(&mut wkt, ", {:.6} {:.6}))", first_pt.0, first_pt.1).unwrap();
+    wkt
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_end_to_end_production_cpu_cost_benchmark() -> Result<()> {
+    let vertex_counts = [1_000, 5_000, 10_000, 25_000, 50_000, 100_000];
+    let num_probes = 5_000;
+    let num_runs = 10;
+    let warmup_runs = 2;
+
+    println!("\n==========================================================================================================================");
+    println!(
+        " END-TO-END PRODUCTION SEDONADB SPANNING JOIN BENCHMARK (10 Repeated Runs, Median Timing)"
+    );
+    println!(" Engine: SedonaDB DataFusion SpatialJoinExec + Metal Spatial Index & Refiner + Production GEOS Refiner");
+    println!(" Refiner Execution Mode: ExecutionMode::Speculative -> PrepareBuild (Prepared Build Polygon in GEOS, Point probes)");
+    println!("==========================================================================================================================\n");
+
+    println!(
+        "{:<10} | {:<12} | {:<12} | {:<16} | {:<12} | {:<10} | {:<17} | {:<14} | {:<10}",
+        "Vertices",
+        "Candidates",
+        "GPU Verified",
+        "Uncertain Routed",
+        "CPU Resolved",
+        "Unc Rate %",
+        "Median Total (ms)",
+        "CPU GEOS (ms)",
+        "CPU Share %"
+    );
+    println!("{:-<128}", "");
+
+    for &n_verts in &vertex_counts {
+        let cx = 500_000.0;
+        let cy = 500_000.0;
+        let r = 10_000.0;
+
+        let poly_wkt = make_coastline_polygon_wkt(cx, cy, r, n_verts, 42);
+        let polys = vec![(0, Some(poly_wkt.as_str()))];
+
+        let span = r * 1.5;
+        let mut state = 99999u64;
+        let mut next_f64 = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / 9007199254740992.0
+        };
+
+        let mut pts_wkt = Vec::with_capacity(num_probes);
+        let mut probe_coords = Vec::with_capacity(num_probes);
+        for _ in 0..num_probes {
+            let px = cx - span + next_f64() * 2.0 * span;
+            let py = cy - span + next_f64() * 2.0 * span;
+            probe_coords.push((px, py));
+            pts_wkt.push(format!("POINT ({:.6} {:.6})", px, py));
+        }
+        let points: Vec<(i32, Option<&str>)> = pts_wkt
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i as i32, Some(s.as_str())))
+            .collect();
+
+        let left = create_table(&polys, 1024)?;
+        let right = create_table(&points, 4096)?;
+
+        let ctx = setup_context(true, true, 4096)?;
+        ctx.register_table("L", left.clone())?;
+        ctx.register_table("R", right.clone())?;
+
+        let sql = "SELECT L.id l_id, R.id r_id FROM L JOIN R ON ST_Intersects(L.geometry, R.geometry) ORDER BY l_id, r_id";
+
+        // Warm up runs
+        for _ in 0..warmup_runs {
+            let df = ctx.sql(sql).await?;
+            let _ = df.collect().await?;
+        }
+
+        // 10 measured runs
+        let mut total_times = Vec::with_capacity(num_runs);
+        let mut last_metrics = None;
+
+        for _ in 0..num_runs {
+            let df = ctx.sql(sql).await?;
+            let t0 = std::time::Instant::now();
+            let plan = df.create_physical_plan().await?;
+            let _results = datafusion::physical_plan::collect(plan.clone(), ctx.task_ctx()).await?;
+            let elapsed = t0.elapsed();
+            total_times.push(elapsed);
+            last_metrics = find_spatial_join_metrics(&plan);
+        }
+
+        total_times.sort();
+        let median_total = total_times[num_runs / 2];
+
+        let metrics = last_metrics.unwrap();
+        let verified = get_metric_count(&metrics, "gpu_verified");
+        let cpu_resolved = get_metric_count(&metrics, "cpu_resolved");
+
+        // Measure GPU refiner candidate & uncertain routing and production GEOS resolution time
+        let mut refiner = sedona_metalspatial::MetalSpatialRefiner::try_new().unwrap();
+        let poly_array: Arc<dyn arrow_array::Array> =
+            Arc::new(create_array(&[Some(poly_wkt.as_str())], &WKB_GEOMETRY));
+        let probe_slices: Vec<Option<&str>> = points.iter().map(|(_, s)| *s).collect();
+        let probe_array: Arc<dyn arrow_array::Array> =
+            Arc::new(create_array(&probe_slices, &WKB_GEOMETRY));
+
+        refiner.push_build(&poly_array).unwrap();
+        refiner.finish_building().unwrap();
+
+        // Candidates: probes falling within polygon bounding box [cx - r, cx + r] x [cy - r, cy + r]
+        let mut cand_b = Vec::new();
+        let mut cand_p = Vec::new();
+        for (i, &(px, py)) in probe_coords.iter().enumerate() {
+            if px >= cx - r && px <= cx + r && py >= cy - r && py <= cy + r {
+                cand_b.push(0u32);
+                cand_p.push(i as u32);
+            }
+        }
+        let cand_count = cand_b.len();
+
+        let mut vb = Vec::new();
+        let mut vp = Vec::new();
+        let mut ub = Vec::new();
+        let mut up = Vec::new();
+        refiner
+            .refine(
+                &probe_array,
+                sedona_metalspatial::ContainerSide::Build,
+                &cand_b,
+                &cand_p,
+                &mut vb,
+                &mut vp,
+                &mut ub,
+                &mut up,
+            )
+            .unwrap();
+
+        let num_uncertain = ub.len();
+        let unc_rate = if cand_count > 0 {
+            (num_uncertain as f64) / (cand_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Measure GEOS CPU resolution time on the exact uncertain candidates
+        let mut cpu_elapsed = std::time::Duration::ZERO;
+        if num_uncertain > 0 {
+            use sedona_spatial_join::refine::IndexQueryResultRefinerFactory;
+            let cpu_refiner_factory =
+                sedona_spatial_join::refine::DefaultIndexQueryResultRefinerFactory;
+            let stats = sedona_expr::statistics::GeoStatistics::empty()
+                .with_total_geometries(1)
+                .with_total_points(n_verts as i64);
+            let cpu_refiner = cpu_refiner_factory
+                .create_refiner(
+                    &sedona_spatial_join::SpatialPredicate::Relation(
+                        sedona_query_planner::spatial_predicate::RelationPredicate::new(
+                            Arc::new(datafusion_physical_expr::expressions::Column::new("l", 0)),
+                            Arc::new(datafusion_physical_expr::expressions::Column::new("r", 0)),
+                            sedona_query_planner::spatial_predicate::SpatialRelationType::Intersects,
+                        ),
+                    ),
+                    sedona_common::SpatialJoinOptions::default(),
+                    1,
+                    stats,
+                )
+                .unwrap();
+
+            let poly_bin = poly_array
+                .as_any()
+                .downcast_ref::<arrow_array::BinaryArray>()
+                .unwrap();
+            let probe_bin = probe_array
+                .as_any()
+                .downcast_ref::<arrow_array::BinaryArray>()
+                .unwrap();
+            let poly_wkb = poly_bin.value(0);
+            let poly_geom = wkb::reader::read_wkb(poly_wkb).unwrap();
+
+            let query_results = vec![sedona_spatial_join::IndexQueryResult {
+                wkb: &poly_geom,
+                distance: None,
+                geom_idx: 0,
+                position: (0, 0),
+            }];
+
+            let t_cpu = std::time::Instant::now();
+            for &p_idx in &up {
+                let p_wkb = probe_bin.value(p_idx as usize);
+                let p_geom = wkb::reader::read_wkb(p_wkb).unwrap();
+                let _ = cpu_refiner.refine(&p_geom, &query_results).unwrap();
+            }
+            cpu_elapsed = t_cpu.elapsed();
+        }
+
+        let median_ms = median_total.as_secs_f64() * 1000.0;
+        let cpu_geos_ms = cpu_elapsed.as_secs_f64() * 1000.0;
+        let cpu_share = if median_ms > 0.0 {
+            (cpu_geos_ms / median_ms) * 100.0
+        } else {
+            0.0
+        };
+
+        println!(
+            "{:<10} | {:<12} | {:<12} | {:<16} | {:<12} | {:>9.3}% | {:>17.2} | {:>14.2} | {:>10.2}%",
+            n_verts,
+            cand_count,
+            verified,
+            num_uncertain,
+            cpu_resolved,
+            unc_rate,
+            median_ms,
+            cpu_geos_ms,
+            cpu_share
+        );
+    }
 
     Ok(())
 }

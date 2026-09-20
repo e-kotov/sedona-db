@@ -159,7 +159,7 @@ impl MetalSpatialRefiner {
     pub fn supports_predicate(predicate_name: &str) -> bool {
         matches!(
             predicate_name,
-            "Contains" | "Within" | "Covers" | "CoveredBy" | "Intersects"
+            "Contains" | "Within" | "Covers" | "CoveredBy" | "Intersects" | "Touches" | "Equals"
         )
     }
 
@@ -235,6 +235,7 @@ impl MetalSpatialRefiner {
     /// - Pairs certified definitely inside (and container is Build or Either) are written to `out_verified_*`.
     /// - Pairs that are ambiguous, non-point/MultiPoint/empty/NaN, or container is Probe are written to `out_uncertain_*`.
     /// - Pairs definitely outside are rejected.
+    #[allow(clippy::too_many_arguments)]
     pub fn refine(
         &self,
         probe: &ArrayRef,
