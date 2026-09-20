@@ -20,7 +20,7 @@
 use arrow_array::{ArrayRef, BinaryArray};
 use byteorder::{BigEndian, ByteOrder, LittleEndian, WriteBytesExt};
 use robust::Coord;
-use sedona_metalspatial::{ContainerSide, MetalSpatialRefiner};
+use sedona_metalspatial::{ContainerSide, MetalSpatialRefiner, RtConfig, RtInfo};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -1732,4 +1732,598 @@ fn test_concurrent_multi_threaded_refiner() {
         "P5: 8-thread concurrent refiner test passed on {}",
         device_name
     );
+}
+
+// =====================================================================================
+// Gate 9: ray-traced edge index vs linear scan, bit-identical per-pair states
+// =====================================================================================
+
+const RT_LINEAR: RtConfig = RtConfig {
+    enabled: 0,
+    min_ring_vertices: 0,
+    segs_per_box: 0,
+    slot_base: 0,
+    collect_stats: 0,
+};
+
+fn rt_cfg(min_ring_vertices: u32, segs_per_box: u32, slot_base: u32) -> RtConfig {
+    RtConfig {
+        enabled: 1,
+        min_ring_vertices,
+        segs_per_box,
+        slot_base,
+        collect_stats: 1,
+    }
+}
+
+fn to_poly_array(polys: &[MultiPolyDef]) -> ArrayRef {
+    let wkbs: Vec<Vec<u8>> = polys.iter().map(make_multipoly_wkb).collect();
+    let slices: Vec<Option<&[u8]>> = wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    Arc::new(BinaryArray::from(slices))
+}
+
+fn to_point_array(probes: &[(f64, f64)]) -> ArrayRef {
+    let wkbs: Vec<Vec<u8>> = probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+    let slices: Vec<Option<&[u8]>> = wkbs.iter().map(|w| Some(w.as_slice())).collect();
+    Arc::new(BinaryArray::from(slices))
+}
+
+fn run_states(
+    cfg: RtConfig,
+    poly_array: &ArrayRef,
+    probe_array: &ArrayRef,
+    cand_b: &[u32],
+    cand_p: &[u32],
+) -> (Vec<u32>, RtInfo) {
+    let mut refiner =
+        MetalSpatialRefiner::try_new_with_rt_config(0, cfg).expect("Failed to create refiner");
+    refiner.push_build(poly_array).unwrap();
+    refiner.finish_building().unwrap();
+    let states = refiner
+        .refine_states(probe_array, cand_b, cand_p)
+        .expect("refine_states failed");
+    (states, refiner.rt_info())
+}
+
+#[derive(Default, Debug)]
+struct ParityTotals {
+    pairs_compared: u64,
+    rt_pairs: u64,
+    mismatches: u64,
+    duplicate_reports: u64,
+    foreign_reports: u64,
+    box_reports: u64,
+    ring_evals_x: u64,
+    ring_evals_y: u64,
+    eta_fallbacks: u64,
+    uncertain_linear: u64,
+    uncertain_rt: u64,
+}
+
+/// Runs the linear-scan kernel once and every RT configuration on the same inputs and
+/// compares the raw per-pair state arrays. Returns the RtInfo of each RT run.
+fn check_rt_parity(
+    name: &str,
+    polys: &[MultiPolyDef],
+    probes: &[(f64, f64)],
+    pairs: &[(u32, u32)],
+    cfgs: &[RtConfig],
+    totals: &mut ParityTotals,
+) -> Vec<RtInfo> {
+    let poly_array = to_poly_array(polys);
+    let probe_array = to_point_array(probes);
+    let (cand_b, cand_p): (Vec<u32>, Vec<u32>) = pairs.iter().copied().unzip();
+
+    let (linear, linear_info) = run_states(RT_LINEAR, &poly_array, &probe_array, &cand_b, &cand_p);
+    assert_eq!(
+        linear_info.indexed_rings, 0,
+        "reference run must be pure linear"
+    );
+
+    let mut infos = Vec::new();
+    for cfg in cfgs {
+        let (rt, info) = run_states(*cfg, &poly_array, &probe_array, &cand_b, &cand_p);
+        let mut mismatches = 0u64;
+        for i in 0..linear.len() {
+            if linear[i] != rt[i] {
+                if mismatches < 5 {
+                    let (b, p) = pairs[i];
+                    println!(
+                        "[GATE 9 MISMATCH] {name} cfg={cfg:?} pair=({b},{p}) probe={:?} linear={} rt={}",
+                        probes[p as usize], linear[i], rt[i]
+                    );
+                }
+                mismatches += 1;
+            }
+        }
+        totals.pairs_compared += linear.len() as u64;
+        totals.rt_pairs += info.pairs_with_rt;
+        totals.mismatches += mismatches;
+        totals.duplicate_reports += info.duplicate_reports;
+        totals.foreign_reports += info.foreign_reports;
+        totals.box_reports += info.box_reports;
+        totals.ring_evals_x += info.ring_evals_x;
+        totals.ring_evals_y += info.ring_evals_y;
+        totals.eta_fallbacks += info.eta_fallbacks;
+        totals.uncertain_linear += linear.iter().filter(|&&s| s == 2).count() as u64;
+        totals.uncertain_rt += rt.iter().filter(|&&s| s == 2).count() as u64;
+        println!(
+            "[GATE 9] {name:<34} T={:<6} S={:<3} z0={:<7} pairs={:<8} rt_pairs={:<8} rings={:<4} boxes={:<6} y_evals={:<6} eta_fallbacks={:<5} dups={} mismatches={}",
+            cfg.min_ring_vertices,
+            cfg.segs_per_box,
+            cfg.slot_base,
+            linear.len(),
+            info.pairs_with_rt,
+            info.indexed_rings,
+            info.boxes,
+            info.ring_evals_y,
+            info.eta_fallbacks,
+            info.duplicate_reports,
+            mismatches
+        );
+        infos.push(info);
+    }
+    infos
+}
+
+fn all_pairs(num_polys: usize, num_probes: usize) -> Vec<(u32, u32)> {
+    let mut pairs = Vec::with_capacity(num_polys * num_probes);
+    for b in 0..num_polys {
+        for p in 0..num_probes {
+            pairs.push((b as u32, p as u32));
+        }
+    }
+    pairs
+}
+
+fn f64_steps(v: f64, k: i32) -> f64 {
+    let mut out = v;
+    for _ in 0..k.abs() {
+        out = if k > 0 {
+            out.next_up()
+        } else {
+            out.next_down()
+        };
+    }
+    out
+}
+
+/// Probes aimed at the structure of the edge index of `ring` when its segments are
+/// grouped `segs` per box: y exactly at box y-bounds (and ring ymin/ymax), x exactly at
+/// box x-faces, the estimated padded faces, and a few ulps / f32-ulps around each.
+fn box_structure_probes(
+    poly: &MultiPolyDef,
+    ring: &[(f64, f64)],
+    segs: usize,
+    max_boxes: usize,
+    rng: &mut SeededRng,
+    out: &mut Vec<(f64, f64)>,
+) {
+    // Polygon bbox centre: the origin the flattener uses for the local frame.
+    let (mut pminx, mut pminy, mut pmaxx, mut pmaxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for part in &poly.parts {
+        for r in &part.rings {
+            for &(x, y) in r {
+                pminx = pminx.min(x);
+                pmaxx = pmaxx.max(x);
+                pminy = pminy.min(y);
+                pmaxy = pmaxy.max(y);
+            }
+        }
+    }
+    let (ox, oy) = ((pminx + pmaxx) / 2.0, (pminy + pmaxy) / 2.0);
+    let m_ring = ring.iter().fold(0.0f64, |m, &(x, y)| {
+        m.max((x - ox).abs()).max((y - oy).abs())
+    });
+    // World-unit size of the traversal slack (2^-13 in scaled units, scale = 2^-exp).
+    let exp = m_ring.log2().floor() as i32 + 1;
+    let pad_world = 2.0f64.powi(exp - 13);
+    let f32_ulp_world = 2.0f64.powi(exp - 24);
+
+    let (rminy, rmaxy) = ring
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+    let (rminx, rmaxx) = ring
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &(x, _)| (a.min(x), b.max(x)));
+
+    let n = ring.len();
+    let num_boxes = n.div_ceil(segs);
+    let stride = (num_boxes / max_boxes).max(1);
+    let offsets = |face: f64, sign: f64, out: &mut Vec<f64>| {
+        out.push(face);
+        for k in [1, 2, 4] {
+            out.push(f64_steps(face, k));
+            out.push(f64_steps(face, -k));
+        }
+        for m in [0.5, 1.0, 2.0, 16.0] {
+            out.push(face + m * f32_ulp_world);
+            out.push(face - m * f32_ulp_world);
+        }
+        // Estimated padded face and its neighbourhood (outside the box by the pad).
+        for m in [0.5, 0.999, 1.0, 1.001, 2.0] {
+            out.push(face + sign * m * pad_world);
+        }
+        for m in [-2.0, -1.0, 1.0, 2.0] {
+            out.push(face + sign * pad_world + m * f32_ulp_world);
+        }
+    };
+
+    let mut ys = Vec::new();
+    let mut xs = Vec::new();
+    offsets(rminy, -1.0, &mut ys);
+    offsets(rmaxy, 1.0, &mut ys);
+    offsets(rminx, -1.0, &mut xs);
+    offsets(rmaxx, 1.0, &mut xs);
+    for &y in &ys {
+        for t in [-0.3, 0.1, 0.5, 0.9, 1.3] {
+            out.push((rminx + t * (rmaxx - rminx), y));
+        }
+    }
+    for &x in &xs {
+        for t in [-0.3, 0.1, 0.5, 0.9, 1.3] {
+            out.push((x, rminy + t * (rmaxy - rminy)));
+        }
+    }
+
+    for g in (0..num_boxes).step_by(stride) {
+        let e0 = g * segs;
+        let e1 = (e0 + segs).min(n);
+        let (mut bminx, mut bminy, mut bmaxx, mut bmaxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for i in e0..e1 {
+            for &(x, y) in &[ring[i], ring[(i + 1) % n]] {
+                bminx = bminx.min(x);
+                bmaxx = bmaxx.max(x);
+                bminy = bminy.min(y);
+                bmaxy = bmaxy.max(y);
+            }
+        }
+        let mut ys = Vec::new();
+        let mut xs = Vec::new();
+        offsets(bminy, -1.0, &mut ys);
+        offsets(bmaxy, 1.0, &mut ys);
+        offsets(bminx, -1.0, &mut xs);
+        offsets(bmaxx, 1.0, &mut xs);
+        let w = (bmaxx - bminx).max(f32_ulp_world);
+        let h = (bmaxy - bminy).max(f32_ulp_world);
+        for &y in &ys {
+            // left of the box (ray passes through it), inside its x-range, and right of it
+            out.push((bminx - w * (0.5 + rng.next_f64()), y));
+            out.push((bminx + w * rng.next_f64(), y));
+            out.push((bmaxx + w * 0.5, y));
+        }
+        for &x in &xs {
+            out.push((x, bminy + h * rng.next_f64()));
+            out.push((x, bminy - h * (0.5 + rng.next_f64())));
+            out.push((x, bmaxy + h * 0.5));
+        }
+    }
+}
+
+/// Probes exactly on vertices, on edge midpoints, and uniformly random around the polygon.
+fn generic_probes(
+    ring: &[(f64, f64)],
+    num_vertex: usize,
+    num_random: usize,
+    rng: &mut SeededRng,
+    out: &mut Vec<(f64, f64)>,
+) {
+    let n = ring.len();
+    let step = (n / num_vertex).max(1);
+    for i in (0..n).step_by(step) {
+        let (ax, ay) = ring[i];
+        let (bx, by) = ring[(i + 1) % n];
+        out.push((ax, ay));
+        out.push(((ax + bx) / 2.0, (ay + by) / 2.0));
+        out.push((ax.next_up(), ay));
+        out.push((ax, ay.next_down()));
+    }
+    let (minx, maxx) = ring
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &(x, _)| (a.min(x), b.max(x)));
+    let (miny, maxy) = ring
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+    for _ in 0..num_random {
+        out.push((
+            minx + (rng.next_f64() * 1.2 - 0.1) * (maxx - minx),
+            miny + (rng.next_f64() * 1.2 - 0.1) * (maxy - miny),
+        ));
+    }
+}
+
+/// Axis-aligned comb: every edge is horizontal or vertical, with many collinear
+/// horizontal edges sharing the same y (the worst case for a +x ray).
+fn generate_comb_ring(cx: f64, cy: f64, r: f64, teeth: usize) -> Vec<(f64, f64)> {
+    let mut ring = Vec::new();
+    let x0 = cx - r;
+    let w = 2.0 * r / (2.0 * teeth as f64);
+    ring.push((x0, cy - r));
+    ring.push((cx + r, cy - r));
+    // top side, right to left, alternating tooth height
+    for t in 0..teeth {
+        let xr = cx + r - (2 * t) as f64 * w;
+        let xm = xr - w;
+        let xl = xm - w;
+        ring.push((xr, cy + r));
+        ring.push((xm, cy + r));
+        ring.push((xm, cy));
+        ring.push((xl, cy));
+    }
+    ring
+}
+
+#[test]
+fn test_gate_9_rt_edge_index_bit_identical_states() {
+    let mut totals = ParityTotals::default();
+    let all_rings = [rt_cfg(3, 2, 0), rt_cfg(3, 16, 0), rt_cfg(256, 16, 0)];
+
+    // (a) Existing adversarial suite over a coordinate scale matrix. T=3 indexes every
+    // ring, including the 4-vertex holes/multipolygon parts and the adversarial ring.
+    for &cx in &[1e2, 5e5, 1e7, -1e7] {
+        for &r in &[1e-3, 1.0, 1e3, 1e6] {
+            let (polys, probes, pairs) = generate_adversarial_suite(cx, cx, r, 777);
+            check_rt_parity(
+                &format!("adversarial c={cx:e} R={r:e}"),
+                &polys,
+                &probes,
+                &pairs,
+                &all_rings,
+                &mut totals,
+            );
+        }
+    }
+
+    // (b) Coastline polygons 1k/10k/100k with a coastline hole and a second part, at
+    // lon/lat and projected scales; probes target box faces, padded faces, vertices.
+    let mut rng = SeededRng::new(20260920);
+    for &(cx, cy, r) in &[(-74.0, 40.7, 0.5), (500_000.0, 4_500_000.0, 50_000.0)] {
+        for &n in &[1_000usize, 10_000, 100_000] {
+            let ext = generate_realistic_coastline_ring(cx, cy, r, n, &mut rng);
+            let mut hole = generate_realistic_coastline_ring(cx, cy, r * 0.15, n / 4, &mut rng);
+            hole.reverse();
+            let part2 = generate_realistic_coastline_ring(
+                cx + 3.0 * r,
+                cy + 0.5 * r,
+                r * 0.7,
+                n / 2,
+                &mut rng,
+            );
+            let poly = MultiPolyDef {
+                parts: vec![
+                    PolyPart {
+                        rings: vec![ext.clone(), hole.clone()],
+                    },
+                    PolyPart {
+                        rings: vec![part2.clone()],
+                    },
+                ],
+            };
+            let mut probes = Vec::new();
+            for ring in [&ext, &hole, &part2] {
+                for segs in [2usize, 16] {
+                    box_structure_probes(&poly, ring, segs, 24, &mut rng, &mut probes);
+                }
+                generic_probes(ring, 200, 3000, &mut rng, &mut probes);
+            }
+            let pairs = all_pairs(1, probes.len());
+            check_rt_parity(
+                &format!("coastline n={n} c={cx:e}"),
+                std::slice::from_ref(&poly),
+                &probes,
+                &pairs,
+                &all_rings,
+                &mut totals,
+            );
+        }
+    }
+
+    // (c) Horizontal and vertical edges only; probes exactly on the shared tooth levels.
+    for &(cx, cy, r) in &[(10.0, 20.0, 1.0), (-3_000_000.0, 7_000_000.0, 12_345.678)] {
+        let comb = generate_comb_ring(cx, cy, r, 300);
+        let poly = MultiPolyDef {
+            parts: vec![PolyPart {
+                rings: vec![comb.clone()],
+            }],
+        };
+        let mut probes = Vec::new();
+        for segs in [2usize, 16] {
+            box_structure_probes(&poly, &comb, segs, 80, &mut rng, &mut probes);
+        }
+        generic_probes(&comb, 400, 2000, &mut rng, &mut probes);
+        for k in -4..=4 {
+            for t in 0..50 {
+                let x = cx - 1.2 * r + 2.4 * r * (t as f64) / 49.0;
+                probes.push((x, f64_steps(cy, k)));
+                probes.push((x, f64_steps(cy + r, k)));
+                probes.push((x, f64_steps(cy - r, k)));
+            }
+        }
+        let pairs = all_pairs(1, probes.len());
+        check_rt_parity(
+            &format!("comb c={cx:e}"),
+            std::slice::from_ref(&poly),
+            &probes,
+            &pairs,
+            &all_rings,
+            &mut totals,
+        );
+    }
+
+    // (d) Rings just below / at / above the vertex threshold T = 256.
+    {
+        let mut polys = Vec::new();
+        let mut probes = Vec::new();
+        for (i, &n) in [255usize, 256, 257].iter().enumerate() {
+            let ring = generate_realistic_coastline_ring(5.0 * i as f64, 50.0, 1.0, n, &mut rng);
+            let poly = MultiPolyDef {
+                parts: vec![PolyPart {
+                    rings: vec![ring.clone()],
+                }],
+            };
+            box_structure_probes(&poly, &ring, 16, 16, &mut rng, &mut probes);
+            generic_probes(&ring, 64, 1000, &mut rng, &mut probes);
+            polys.push(poly);
+        }
+        let pairs = all_pairs(polys.len(), probes.len());
+        let infos = check_rt_parity(
+            "threshold 255/256/257",
+            &polys,
+            &probes,
+            &pairs,
+            &[rt_cfg(256, 16, 0)],
+            &mut totals,
+        );
+        assert_eq!(
+            infos[0].indexed_rings, 2,
+            "only rings with >= T vertices are indexed"
+        );
+    }
+
+    // (e) z slot limit guard (2^18 slots). Six large rings starting 3 slots below the
+    // limit: three are indexed at the largest z values, three are refused and stay linear.
+    {
+        const SLOT_LIMIT: u32 = 1 << 18;
+        let mut polys = Vec::new();
+        let mut probes = Vec::new();
+        for i in 0..6 {
+            let ring =
+                generate_realistic_coastline_ring(-120.0 + i as f64, 35.0, 0.4, 3000, &mut rng);
+            let poly = MultiPolyDef {
+                parts: vec![PolyPart {
+                    rings: vec![ring.clone()],
+                }],
+            };
+            box_structure_probes(&poly, &ring, 16, 16, &mut rng, &mut probes);
+            generic_probes(&ring, 64, 1500, &mut rng, &mut probes);
+            polys.push(poly);
+        }
+        let pairs = all_pairs(polys.len(), probes.len());
+        let infos = check_rt_parity(
+            "slot limit guard",
+            &polys,
+            &probes,
+            &pairs,
+            &[
+                rt_cfg(256, 16, SLOT_LIMIT - 3),
+                rt_cfg(256, 16, SLOT_LIMIT - 6),
+            ],
+            &mut totals,
+        );
+        assert_eq!(infos[0].indexed_rings, 3);
+        assert_eq!(infos[0].rings_skipped_slot_limit, 3);
+        assert_eq!(infos[1].indexed_rings, 6);
+        assert_eq!(infos[1].rings_skipped_slot_limit, 0);
+    }
+
+    // (f) A ring large enough to force segs_per_box widening (n / 4096 > 16).
+    {
+        let n = 400_000usize;
+        let ring = generate_realistic_coastline_ring(12.5, 55.5, 3.0, n, &mut rng);
+        let poly = MultiPolyDef {
+            parts: vec![PolyPart {
+                rings: vec![ring.clone()],
+            }],
+        };
+        let mut probes = Vec::new();
+        box_structure_probes(&poly, &ring, n.div_ceil(4096), 48, &mut rng, &mut probes);
+        generic_probes(&ring, 200, 4000, &mut rng, &mut probes);
+        let pairs = all_pairs(1, probes.len());
+        let infos = check_rt_parity(
+            "widened boxes n=400k",
+            std::slice::from_ref(&poly),
+            &probes,
+            &pairs,
+            &[rt_cfg(256, 16, 0)],
+            &mut totals,
+        );
+        assert!(infos[0].boxes <= 4096);
+    }
+
+    println!("[GATE 9 REPORT] {totals:?}");
+    assert!(totals.rt_pairs > 0, "the RT branch was never reached");
+    assert!(totals.ring_evals_y > 0, "the RT +y retry was never reached");
+    assert_eq!(totals.mismatches, 0, "RT states differ from linear states");
+    assert_eq!(
+        totals.duplicate_reports, 0,
+        "traversal reported a bounding box more than once (filtered, but unexpected)"
+    );
+}
+
+/// Kernel timing, linear scan vs ray-traced edge index, same refine() dispatch.
+#[test]
+#[ignore]
+fn test_rt_edge_index_kernel_microbenchmark() {
+    let mut rng = SeededRng::new(99);
+    let num_probes = 20_000usize;
+    let runs = 11;
+    println!(
+        "{:<9} | {:<8} | {:>11} | {:>11} | {:>8} | {:>9} | {:>9}",
+        "Vertices", "Scale", "linear ms", "rt ms", "speedup", "AS KiB", "build ms"
+    );
+    for &(scale_name, cx, cy, r) in &[("lonlat", -74.0, 40.7, 0.5), ("proj", 5e5, 5e5, 1e4)] {
+        for &n in &[1_000usize, 10_000, 100_000] {
+            let ring = generate_realistic_coastline_ring(cx, cy, r, n, &mut rng);
+            let poly = MultiPolyDef {
+                parts: vec![PolyPart { rings: vec![ring] }],
+            };
+            let poly_array = to_poly_array(std::slice::from_ref(&poly));
+            let probes: Vec<(f64, f64)> = (0..num_probes)
+                .map(|_| {
+                    (
+                        cx + (rng.next_f64() * 3.0 - 1.5) * r,
+                        cy + (rng.next_f64() * 3.0 - 1.5) * r,
+                    )
+                })
+                .collect();
+            let probe_array = to_point_array(&probes);
+            let cand_b = vec![0u32; num_probes];
+            let cand_p: Vec<u32> = (0..num_probes as u32).collect();
+
+            let mut medians = Vec::new();
+            let mut states_ref: Option<Vec<u32>> = None;
+            let mut info = RtInfo::default();
+            for cfg in [
+                RT_LINEAR,
+                RtConfig {
+                    collect_stats: 0,
+                    ..rt_cfg(256, 16, 0)
+                },
+            ] {
+                let mut refiner = MetalSpatialRefiner::try_new_with_rt_config(0, cfg).unwrap();
+                refiner.push_build(&poly_array).unwrap();
+                refiner.finish_building().unwrap();
+                if cfg.enabled == 1 {
+                    info = refiner.rt_info();
+                }
+                let mut times = Vec::new();
+                for run in 0..=runs {
+                    let t = std::time::Instant::now();
+                    let states = refiner
+                        .refine_states(&probe_array, &cand_b, &cand_p)
+                        .unwrap();
+                    let el = t.elapsed().as_secs_f64() * 1000.0;
+                    if run > 0 {
+                        times.push(el); // run 0 is warmup
+                    }
+                    match &states_ref {
+                        None => states_ref = Some(states),
+                        Some(r) => assert_eq!(r, &states),
+                    }
+                }
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                medians.push(times[times.len() / 2]);
+            }
+            println!(
+                "{:<9} | {:<8} | {:>11.2} | {:>11.2} | {:>7.1}x | {:>9.1} | {:>9.2}",
+                n,
+                scale_name,
+                medians[0],
+                medians[1],
+                medians[0] / medians[1],
+                info.accel_bytes as f64 / 1024.0,
+                info.gpu_build_micros as f64 / 1000.0
+            );
+        }
+    }
 }

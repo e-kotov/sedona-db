@@ -235,7 +235,43 @@ int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode) {
     return -1;
   }
 }
+
+int SedonaMetalRefinerCreateWithRtConfig(void** out_refiner, int bound_mode,
+                                         const SedonaMetalRtConfig* rt_config) {
+  if (!out_refiner || !rt_config) return -1;
+  try {
+    @autoreleasepool {
+      RtConfig cfg;
+      cfg.enabled = rt_config->enabled;
+      cfg.min_ring_vertices = rt_config->min_ring_vertices;
+      cfg.segs_per_box = rt_config->segs_per_box;
+      cfg.slot_base = rt_config->slot_base;
+      cfg.collect_stats = rt_config->collect_stats;
+      auto* refiner = new MetalSpatialRefiner(nil, bound_mode, &cfg);
+      *out_refiner = static_cast<void*>(refiner);
+      return 0;
+    }
+  } catch (const std::exception& e) {
+    g_last_refiner_error = e.what();
+    *out_refiner = nullptr;
+    return -1;
+  } catch (...) {
+    g_last_refiner_error = "Unknown exception in refiner constructor";
+    *out_refiner = nullptr;
+    return -1;
+  }
+}
 #endif
+
+int SedonaMetalRefinerGetRtInfo(void* refiner, uint64_t* out_info) {
+  if (!refiner || !out_info) return -1;
+  try {
+    static_cast<MetalSpatialRefiner*>(refiner)->get_rt_info(out_info);
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
 
 int SedonaMetalRefinerPushPolygons(void* refiner, const void* polys, uint32_t poly_count,
                                    const void* parts, uint32_t part_count,

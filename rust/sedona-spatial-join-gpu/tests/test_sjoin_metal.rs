@@ -65,6 +65,20 @@ fn setup_context(
     fallback_to_cpu: bool,
     batch_size: usize,
 ) -> Result<SessionContext> {
+    setup_context_with_builder(
+        SessionStateBuilder::new(),
+        gpu_enable,
+        fallback_to_cpu,
+        batch_size,
+    )
+}
+
+fn setup_context_with_builder(
+    mut state_builder: SessionStateBuilder,
+    gpu_enable: bool,
+    fallback_to_cpu: bool,
+    batch_size: usize,
+) -> Result<SessionContext> {
     let mut session_config = SessionConfig::from_env()?
         .with_information_schema(true)
         .with_batch_size(batch_size);
@@ -78,7 +92,6 @@ fn setup_context(
     gpu_options.fallback_to_cpu = fallback_to_cpu;
     session_config = session_config.with_option_extension(gpu_options);
 
-    let mut state_builder = SessionStateBuilder::new();
     state_builder = register_spatial_join_logical_optimizer(state_builder)?;
 
     // Register planners: Default first, then GPU.
@@ -1027,5 +1040,133 @@ async fn test_end_to_end_production_cpu_cost_benchmark() -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn sum_spatial_join_metric(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    let own = if plan.name() == "SpatialJoinExec" {
+        plan.metrics()
+            .map(|m| get_metric_count(&m, name))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    own + plan
+        .children()
+        .into_iter()
+        .map(|child| sum_spatial_join_metric(child, name))
+        .sum::<usize>()
+}
+
+/// SpatialBench double `ST_Within` join from docs/gpu-acceleration.md, CPU vs Metal.
+///
+/// Needs `SEDONA_SPATIALBENCH_DIR` pointing at a directory with `zone/` and `trip/`
+/// parquet folders (e.g. `hf-data/v0.1.0/sf1`). `SEDONA_BENCH_MEMORY_LIMIT_GB`
+/// (default 12) bounds the DataFusion memory pool; `SEDONA_BENCH_RUNS` (default 5),
+/// `SEDONA_BENCH_BATCH_SIZE` (default 8192).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn test_spatialbench_within_join_cpu_vs_metal_benchmark() -> Result<()> {
+    let Ok(data_dir) = std::env::var("SEDONA_SPATIALBENCH_DIR") else {
+        println!("SEDONA_SPATIALBENCH_DIR not set; skipping");
+        return Ok(());
+    };
+    let env_usize = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    };
+    let memory_limit_gb = env_usize("SEDONA_BENCH_MEMORY_LIMIT_GB", 12);
+    let num_runs = env_usize("SEDONA_BENCH_RUNS", 5);
+    let batch_size = env_usize("SEDONA_BENCH_BATCH_SIZE", 8192);
+
+    let sql = "SELECT COUNT(*) AS cross_zone_trip_count
+        FROM trip t
+            JOIN zone pickup_zone
+                ON ST_Within(ST_GeomFromWKB(t.t_pickuploc), ST_GeomFromWKB(pickup_zone.z_boundary))
+            JOIN zone dropoff_zone
+                ON ST_Within(ST_GeomFromWKB(t.t_dropoffloc), ST_GeomFromWKB(dropoff_zone.z_boundary))
+        WHERE pickup_zone.z_zonekey != dropoff_zone.z_zonekey";
+
+    println!("\nSpatialBench ST_Within join: {data_dir}, memory pool {memory_limit_gb} GB, batch size {batch_size}, {num_runs} runs + 1 warmup");
+
+    let mut counts = Vec::new();
+    for (label, gpu_enable) in [("CPU", false), ("Metal", true)] {
+        let runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_memory_limit(memory_limit_gb << 30, 1.0)
+            .build_arc()?;
+        let state_builder = SessionStateBuilder::new()
+            .with_default_features()
+            .with_runtime_env(runtime);
+        // No CPU fallback: a Metal failure must surface, not be timed as a Metal run.
+        let ctx = setup_context_with_builder(state_builder, gpu_enable, false, batch_size)?;
+        for table in ["zone", "trip"] {
+            ctx.register_parquet(table, format!("{data_dir}/{table}/"), Default::default())
+                .await?;
+        }
+
+        let mut times = Vec::with_capacity(num_runs);
+        let mut count = 0i64;
+        for run in 0..=num_runs {
+            let df = ctx.sql(sql).await?;
+            let t0 = std::time::Instant::now();
+            let plan = df.create_physical_plan().await?;
+            let batches = datafusion_physical_plan::collect(plan.clone(), ctx.task_ctx()).await?;
+            let elapsed = t0.elapsed();
+            count = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow_array::Int64Array>()
+                .unwrap()
+                .value(0);
+
+            if run == 0 {
+                let plan_display = datafusion_physical_plan::displayable(plan.as_ref())
+                    .indent(true)
+                    .to_string();
+                for line in plan_display
+                    .lines()
+                    .filter(|l| l.contains("SpatialJoinExec"))
+                {
+                    println!("  [{label}] {}", line.trim());
+                }
+                if gpu_enable {
+                    assert!(
+                        plan_display.contains("provider=Gpu"),
+                        "Physical plan must use Gpu provider, got:\n{plan_display}"
+                    );
+                }
+                println!("  [{label}] warmup: {:.3} s", elapsed.as_secs_f64());
+                continue;
+            }
+            println!(
+                "  [{label}] run {run}: {:.3} s | rows {count} | candidates {} | gpu_verified {} | cpu_resolved {}",
+                elapsed.as_secs_f64(),
+                sum_spatial_join_metric(&plan, "join_result_candidates"),
+                sum_spatial_join_metric(&plan, "gpu_verified"),
+                sum_spatial_join_metric(&plan, "cpu_resolved"),
+            );
+            // Time metrics are summed over both joins and all partitions, so they can exceed wall time.
+            let ms = |name: &str| sum_spatial_join_metric(&plan, name) as f64 / 1e6;
+            println!(
+                "  [{label}]        summed ms: build_input_collection {:.0} | build {:.0} | join {:.0} | partition_probe {:.0}",
+                ms("build_input_collection_time"),
+                ms("build_time"),
+                ms("join_time"),
+                ms("partition_probe_time"),
+            );
+            times.push(elapsed);
+        }
+        times.sort();
+        println!(
+            "  [{label}] median {:.3} s | min {:.3} s | rows {count}",
+            times[times.len() / 2].as_secs_f64(),
+            times[0].as_secs_f64()
+        );
+        counts.push(count);
+    }
+
+    assert_eq!(counts[0], counts[1], "CPU and Metal row counts differ");
     Ok(())
 }

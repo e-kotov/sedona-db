@@ -29,12 +29,29 @@
 typedef void* id;
 #endif
 
+// Configuration of the ray-traced edge index used by the refine kernel for large rings.
+// Must match SedonaMetalRtConfig in sedona_metalspatial_c.h.
+struct RtConfig {
+  uint32_t enabled;            // 0: every ring takes the linear scan
+  uint32_t min_ring_vertices;  // rings with fewer vertices take the linear scan
+  uint32_t segs_per_box;       // consecutive ring segments grouped per bounding box
+  uint32_t slot_base;      // test only: first z slot, to exercise the slot limit guard
+  uint32_t collect_stats;  // compile the kernel with diagnostic counters
+
+  // Defaults, overridable through SEDONA_METAL_RT_* environment variables.
+  static RtConfig from_env();
+};
+
+// Number of values written by MetalSpatialRefiner::get_rt_info().
+constexpr uint32_t kRtInfoLen = 16;
+
 class MetalSpatialRefiner {
  public:
 #ifdef ENABLE_TEST_INTERNALS
-  MetalSpatialRefiner(id device = nullptr, int bound_mode = 0);
+  MetalSpatialRefiner(id device = nullptr, int bound_mode = 0,
+                      const RtConfig* rt_config = nullptr);
 #else
-  MetalSpatialRefiner(id device = nullptr);
+  MetalSpatialRefiner(id device = nullptr, const RtConfig* rt_config = nullptr);
 #endif
   ~MetalSpatialRefiner();
 
@@ -55,10 +72,16 @@ class MetalSpatialRefiner {
   const char* get_last_error() const;
   const char* get_device_name() const;
   uint64_t get_memory_usage() const;
+  // Writes kRtInfoLen values: [0] indexed rings, [1] boxes, [2] acceleration structure
+  // bytes, [3] build scratch bytes, [4] GPU build microseconds, [5] host box preparation
+  // microseconds, [6] rings skipped by the slot limit, [7] rings skipped by numeric
+  // guards, [8..15] kernel counters RT_STAT_* (only with collect_stats).
+  void get_rt_info(uint64_t* out) const;
   void set_last_error(const std::string& err);
 
  private:
   void set_error(const std::string& err);
+  void build_rt_index();
 
 #ifdef __OBJC__
   id<MTLDevice> device_;
@@ -69,6 +92,12 @@ class MetalSpatialRefiner {
   id<MTLBuffer> buf_parts_;
   id<MTLBuffer> buf_rings_;
   id<MTLBuffer> buf_vertices_;
+
+  id<MTLComputePipelineState> rt_pipeline_state_;
+  id<MTLAccelerationStructure> rt_accel_;
+  id<MTLBuffer> buf_ring_rt_slots_;
+  id<MTLBuffer> buf_rt_infos_;
+  id<MTLBuffer> buf_rt_stats_;
 #else
   void* device_;
   void* command_queue_;
@@ -78,7 +107,17 @@ class MetalSpatialRefiner {
   void* buf_parts_;
   void* buf_rings_;
   void* buf_vertices_;
+
+  void* rt_pipeline_state_;
+  void* rt_accel_;
+  void* buf_ring_rt_slots_;
+  void* buf_rt_infos_;
+  void* buf_rt_stats_;
 #endif
+
+  RtConfig rt_config_;
+  int bound_mode_;
+  uint64_t rt_info_[8];
 
   std::vector<PolygonRecord> host_polygons_;
   std::vector<PartRecord> host_parts_;

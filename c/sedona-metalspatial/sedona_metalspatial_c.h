@@ -39,7 +39,22 @@ uint64_t SedonaMetalIndexGetMemUsage(void* index);
 int SedonaMetalRefinerCreate(void** out_refiner);
 #ifdef ENABLE_TEST_INTERNALS
 int SedonaMetalRefinerCreateWithMode(void** out_refiner, int bound_mode);
+
+// Ray-traced edge index configuration (must match struct RtConfig in
+// spatial_refiner.hpp).
+typedef struct SedonaMetalRtConfig {
+  uint32_t enabled;
+  uint32_t min_ring_vertices;
+  uint32_t segs_per_box;
+  uint32_t slot_base;
+  uint32_t collect_stats;
+} SedonaMetalRtConfig;
+int SedonaMetalRefinerCreateWithRtConfig(void** out_refiner, int bound_mode,
+                                         const SedonaMetalRtConfig* rt_config);
 #endif
+// Writes 16 values describing the ray-traced edge index (see
+// MetalSpatialRefiner::get_rt_info in spatial_refiner.hpp).
+int SedonaMetalRefinerGetRtInfo(void* refiner, uint64_t* out_info);
 int SedonaMetalRefinerPushPolygons(void* refiner, const void* polys, uint32_t poly_count,
                                    const void* parts, uint32_t part_count,
                                    const void* rings, uint32_t ring_count,

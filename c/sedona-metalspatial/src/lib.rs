@@ -18,7 +18,7 @@
 pub mod flattener;
 pub mod refine;
 
-pub use refine::{ContainerSide, MetalSpatialRefiner};
+pub use refine::{ContainerSide, MetalSpatialRefiner, RtConfig, RtInfo};
 
 #[cfg(target_os = "macos")]
 pub mod ffi {
@@ -49,6 +49,13 @@ pub mod ffi {
             out_refiner: *mut *mut c_void,
             bound_mode: i32,
         ) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerCreateWithRtConfig(
+            out_refiner: *mut *mut c_void,
+            bound_mode: i32,
+            rt_config: *const crate::refine::RtConfig,
+        ) -> i32;
+        pub fn SedonaMetalRefinerGetRtInfo(refiner: *mut c_void, out_info: *mut u64) -> i32;
         pub fn SedonaMetalRefinerPushPolygons(
             refiner: *mut c_void,
             polys: *const c_void,

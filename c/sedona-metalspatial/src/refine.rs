@@ -38,6 +38,45 @@ pub enum ContainerSide {
     Either,
 }
 
+/// Configuration of the ray-traced edge index the refine kernel uses for large rings.
+/// Layout must match `SedonaMetalRtConfig` in `sedona_metalspatial_c.h`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtConfig {
+    /// 0: every ring takes the linear scan (the pre-index kernel).
+    pub enabled: u32,
+    /// Rings with fewer vertices take the linear scan.
+    pub min_ring_vertices: u32,
+    /// Consecutive ring segments grouped per bounding box.
+    pub segs_per_box: u32,
+    /// Test only: first z slot, used to exercise the slot limit guard.
+    pub slot_base: u32,
+    /// Compile the kernel with diagnostic counters.
+    pub collect_stats: u32,
+}
+
+/// Build facts and (optional) kernel counters of the ray-traced edge index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RtInfo {
+    pub indexed_rings: u64,
+    pub boxes: u64,
+    pub accel_bytes: u64,
+    pub scratch_bytes: u64,
+    pub gpu_build_micros: u64,
+    pub host_prep_micros: u64,
+    pub rings_skipped_slot_limit: u64,
+    pub rings_skipped_numeric: u64,
+    /// Kernel counters below are zero unless `RtConfig::collect_stats` is set.
+    pub ring_evals_x: u64,
+    pub ring_evals_y: u64,
+    pub box_reports: u64,
+    pub duplicate_reports: u64,
+    pub foreign_reports: u64,
+    pub eta_fallbacks: u64,
+    pub edges_visited: u64,
+    pub pairs_with_rt: u64,
+}
+
 pub struct MetalSpatialRefiner {
     #[cfg(target_os = "macos")]
     raw: *mut c_void,
@@ -125,6 +164,74 @@ impl MetalSpatialRefiner {
             device_name: dev_name,
             num_build_polygons: 0,
         })
+    }
+
+    /// Internal/test constructor that also pins the ray-traced edge index configuration
+    /// (`enabled: 0` gives the linear-scan kernel used as the reference in parity gates).
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn try_new_with_rt_config(
+        bound_mode: i32,
+        rt_config: RtConfig,
+    ) -> Result<Self, MetalSpatialError> {
+        let mut raw = std::ptr::null_mut();
+        let rc =
+            unsafe { ffi::SedonaMetalRefinerCreateWithRtConfig(&mut raw, bound_mode, &rt_config) };
+        if rc != 0 || raw.is_null() {
+            let msg = unsafe {
+                let ptr = ffi::SedonaMetalRefinerGetLastError(raw);
+                if ptr.is_null() {
+                    "Refiner initialization failed".to_string()
+                } else {
+                    CStr::from_ptr(ptr).to_string_lossy().into_owned()
+                }
+            };
+            return Err(MetalSpatialError::CreationFailed(msg));
+        }
+
+        let dev_name = unsafe {
+            let ptr = ffi::SedonaMetalRefinerGetDeviceName(raw);
+            if ptr.is_null() {
+                "Unknown Apple Silicon GPU".to_string()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
+        };
+
+        Ok(Self {
+            raw,
+            device_name: dev_name,
+            num_build_polygons: 0,
+        })
+    }
+
+    /// Build facts and kernel counters of the ray-traced edge index (all zero when no ring
+    /// is indexed).
+    pub fn rt_info(&self) -> RtInfo {
+        let mut v = [0u64; 16];
+        if self.raw.is_null()
+            || unsafe { ffi::SedonaMetalRefinerGetRtInfo(self.raw, v.as_mut_ptr()) } != 0
+        {
+            return RtInfo::default();
+        }
+        RtInfo {
+            indexed_rings: v[0],
+            boxes: v[1],
+            accel_bytes: v[2],
+            scratch_bytes: v[3],
+            gpu_build_micros: v[4],
+            host_prep_micros: v[5],
+            rings_skipped_slot_limit: v[6],
+            rings_skipped_numeric: v[7],
+            ring_evals_x: v[8],
+            ring_evals_y: v[9],
+            box_reports: v[10],
+            duplicate_reports: v[11],
+            foreign_reports: v[12],
+            eta_fallbacks: v[13],
+            edges_visited: v[14],
+            pairs_with_rt: v[15],
+        }
     }
 
     /// Returns the name of the Metal device running the refiner.
@@ -267,6 +374,63 @@ impl MetalSpatialRefiner {
             return Ok(());
         }
 
+        let decisions =
+            self.candidate_states(probe, candidate_build_indices, candidate_probe_indices)?;
+
+        // Emit verified and uncertain preserving original candidate order
+        for i in 0..n {
+            let b_idx = candidate_build_indices[i];
+            let p_idx = candidate_probe_indices[i];
+            match decisions[i] {
+                STATE_INSIDE => {
+                    out_verified_build.push(b_idx);
+                    out_verified_probe.push(p_idx);
+                }
+                STATE_UNCERTAIN => {
+                    out_uncertain_build.push(b_idx);
+                    out_uncertain_probe.push(p_idx);
+                }
+                STATE_OUTSIDE => {
+                    // Definitely outside: rejected
+                }
+                _ => {
+                    out_uncertain_build.push(b_idx);
+                    out_uncertain_probe.push(p_idx);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Test hook: raw per-candidate kernel states (no container gating), used by the
+    /// linear-scan vs ray-traced parity gates.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn refine_states(
+        &self,
+        probe: &ArrayRef,
+        candidate_build_indices: &[u32],
+        candidate_probe_indices: &[u32],
+    ) -> Result<Vec<u32>, MetalSpatialError> {
+        if candidate_build_indices.len() != candidate_probe_indices.len() {
+            return Err(MetalSpatialError::InvalidState(
+                "Candidate build and probe index slices must have equal length".to_string(),
+            ));
+        }
+        self.candidate_states(probe, candidate_build_indices, candidate_probe_indices)
+    }
+
+    /// Per-candidate 3-state decisions in candidate order. Pairs the kernel cannot evaluate
+    /// stay `STATE_UNCERTAIN`.
+    fn candidate_states(
+        &self,
+        probe: &ArrayRef,
+        candidate_build_indices: &[u32],
+        candidate_probe_indices: &[u32],
+    ) -> Result<Vec<u32>, MetalSpatialError> {
+        let n = candidate_build_indices.len();
+
         // Flatten probe geometries into DecomposedPoint buffer
         let probe_points = flatten_probe_points(probe);
 
@@ -325,30 +489,7 @@ impl MetalSpatialRefiner {
             }
         }
 
-        // Emit verified and uncertain preserving original candidate order
-        for i in 0..n {
-            let b_idx = candidate_build_indices[i];
-            let p_idx = candidate_probe_indices[i];
-            match decisions[i] {
-                STATE_INSIDE => {
-                    out_verified_build.push(b_idx);
-                    out_verified_probe.push(p_idx);
-                }
-                STATE_UNCERTAIN => {
-                    out_uncertain_build.push(b_idx);
-                    out_uncertain_probe.push(p_idx);
-                }
-                STATE_OUTSIDE => {
-                    // Definitely outside: rejected
-                }
-                _ => {
-                    out_uncertain_build.push(b_idx);
-                    out_uncertain_probe.push(p_idx);
-                }
-            }
-        }
-
-        Ok(())
+        Ok(decisions)
     }
 }
 
@@ -374,6 +515,30 @@ impl MetalSpatialRefiner {
     #[doc(hidden)]
     pub fn try_new_with_mode(_bound_mode: i32) -> Result<Self, MetalSpatialError> {
         Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn try_new_with_rt_config(
+        _bound_mode: i32,
+        _rt_config: RtConfig,
+    ) -> Result<Self, MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn refine_states(
+        &self,
+        _probe: &ArrayRef,
+        _candidate_build_indices: &[u32],
+        _candidate_probe_indices: &[u32],
+    ) -> Result<Vec<u32>, MetalSpatialError> {
+        Err(MetalSpatialError::PlatformNotSupported)
+    }
+
+    pub fn rt_info(&self) -> RtInfo {
+        RtInfo::default()
     }
 
     pub fn device_name(&self) -> &str {
