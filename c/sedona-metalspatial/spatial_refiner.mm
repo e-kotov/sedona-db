@@ -34,8 +34,8 @@ MetalSpatialRefiner::MetalSpatialRefiner(id device)
       buf_rings_(nil),
       buf_vertices_(nil),
       is_built_(false),
-      allocated_bytes_(0),
-      num_polygons_(0) {
+      num_polygons_(0),
+      allocated_bytes_(0) {
   @autoreleasepool {
     if (!device_) {
       device_ = MTLCreateSystemDefaultDevice();

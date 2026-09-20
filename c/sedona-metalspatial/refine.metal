@@ -73,7 +73,8 @@ struct DecomposedPoint {
 // Helper to evaluate a single linear ring against a probe point.
 // Uses ray-casting along the positive x-axis.
 // Adheres strictly to Section 2.3, 2.4, and 4.2 of design note v2.
-inline uint32_t evaluate_ring(
+// Primary ray along positive x-axis: { (x, 0) : x >= 0 }
+inline uint32_t evaluate_ring_x(
     RingRecord ring,
     device const Point2D* vertices,
     float delta_x,
@@ -106,11 +107,29 @@ inline uint32_t evaluate_ring(
 
 #if BOUND_MODE == 2
         // Mode 2: band off only (no eta-band vertex trap)
+#elif BOUND_MODE == 4
+        // Mode 4: Legacy unrestricted band rule without edge cull
+        if (metal::abs(y1) <= eta_k || metal::abs(y2) <= eta_k) {
+            return STATE_UNCERTAIN;
+        }
+#elif BOUND_MODE == 5
+        // Mode 5: Unsound trap (skips vertex trap if x < -eta_k on spanning edges)
+        if (metal::max(x1, x2) < -eta_k) {
+            continue;
+        }
+        if ((metal::abs(y1) <= eta_k && x1 >= -eta_k) ||
+            (metal::abs(y2) <= eta_k && x2 >= -eta_k)) {
+            return STATE_UNCERTAIN;
+        }
 #else
+        // Edge cull: An edge lying entirely to the left of the positive x-ray (max(x1, x2) < -eta_k)
+        // cannot cross or graze the ray { (x, 0) : x >= 0 }.
+        if (metal::max(x1, x2) < -eta_k) {
+            continue;
+        }
+
         // Section 2.4 Ray Straddle Vertex Protection:
-        // Conservative eta_k-band rule:
-        // If |y1| <= eta_k or |y2| <= eta_k, a vertex lies within the ambiguity band
-        // of the ray. Traps potential apex/vertex grazing to avoid false outside results.
+        // Unconditional eta_k-band trap on all non-culled edges (including spanning edges).
         if (metal::abs(y1) <= eta_k || metal::abs(y2) <= eta_k) {
             return STATE_UNCERTAIN;
         }
@@ -124,22 +143,17 @@ inline uint32_t evaluate_ring(
             continue;
         }
 
-        // Determinant
+        // Determinant: x1 * y2 - x2 * y1
         float det = x1 * y2 - x2 * y1;
 
 #if BOUND_MODE == 1
-        // Mode 1: Flawed v1 determinant bound only:
+        // Mode 1: Flawed v1 determinant bound only
         float max_coord = metal::max(metal::max(metal::abs(x1), metal::abs(x2)), metal::max(metal::abs(y1), metal::abs(y2)));
         float bound_det = 3.5f * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1)) + u_flt * max_coord;
 #else
-        // Section 2.3 Determinant and Forward Error Bound (v2 approved):
-        // Shewchuk's A-bound: eps_arith = (3 + 16u) * u * (|x1*y2| + |x2*y1|)
+        // Section 2.3 Determinant and Forward Error Bound (v2 approved)
         float eps_arith = (3.0f + 16.0f * u_flt) * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1));
-
-        // Input perturbation: eps_input = eta_k * (|x1| + |x2| + |y1| + |y2|) + 2 * eta_k^2
         float eps_input = eta_k * (metal::abs(x1) + metal::abs(x2) + metal::abs(y1) + metal::abs(y2)) + 2.0f * eta_k * eta_k;
-
-        // Total forward error bound with safety factor S = 2.0 (Section 2.3 D)
         float bound_det = 2.0f * (eps_arith + eps_input);
 #endif
 
@@ -158,6 +172,99 @@ inline uint32_t evaluate_ring(
     }
 
     return (crossings & 1) ? STATE_INSIDE : STATE_OUTSIDE;
+}
+
+// Secondary ray along positive y-axis: { (0, y) : y >= 0 }
+inline uint32_t evaluate_ring_y(
+    RingRecord ring,
+    device const Point2D* vertices,
+    float delta_x,
+    float delta_y,
+    float eta_k,
+    float u_flt)
+{
+    if (ring.vertex_count < 3) {
+        return STATE_UNCERTAIN;
+    }
+
+    uint32_t crossings = 0;
+    uint32_t n = ring.vertex_count;
+    uint32_t start = ring.vertex_start;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        Point2D v1 = vertices[start + i];
+        Point2D v2 = vertices[start + ((i + 1) % n)];
+
+        if (v1.x == v2.x && v1.y == v2.y) {
+            continue;
+        }
+
+        float x1 = v1.x - delta_x;
+        float y1 = v1.y - delta_y;
+        float x2 = v2.x - delta_x;
+        float y2 = v2.y - delta_y;
+
+        // Edge cull: An edge lying entirely below the positive y-ray (max(y1, y2) < -eta_k)
+        // cannot cross or graze the ray { (0, y) : y >= 0 }.
+        if (metal::max(y1, y2) < -eta_k) {
+            continue;
+        }
+
+        // Vertex protection for positive y-ray: trap vertices with |x| <= eta_k
+        if (metal::abs(x1) <= eta_k || metal::abs(x2) <= eta_k) {
+            return STATE_UNCERTAIN;
+        }
+
+        // Certified straddle check across vertical axis x = 0:
+        bool straddles = (x1 > 0.0f) != (x2 > 0.0f);
+        if (!straddles) {
+            continue;
+        }
+
+        // Intercept with x = 0 is y* = (x2 * y1 - x1 * y2) / (x2 - x1)
+        float det_y = x2 * y1 - x1 * y2;
+
+        float eps_arith = (3.0f + 16.0f * u_flt) * u_flt * (metal::abs(x1 * y2) + metal::abs(x2 * y1));
+        float eps_input = eta_k * (metal::abs(x1) + metal::abs(x2) + metal::abs(y1) + metal::abs(y2)) + 2.0f * eta_k * eta_k;
+        float bound_det = 2.0f * (eps_arith + eps_input);
+
+        if (metal::abs(det_y) <= bound_det) {
+            return STATE_UNCERTAIN;
+        }
+
+        // Edge crosses positive y-axis iff sign(det_y) == sign(x2 - x1)
+        bool det_positive = (det_y > 0.0f);
+        bool dx_positive = ((x2 - x1) > 0.0f);
+        if (det_positive == dx_positive) {
+            crossings++;
+        }
+    }
+
+    return (crossings & 1) ? STATE_INSIDE : STATE_OUTSIDE;
+}
+
+// Two-ray certified ring evaluator:
+// Evaluates primary +x ray; on uncertainty, retries with orthogonal +y ray.
+inline uint32_t evaluate_ring(
+    RingRecord ring,
+    device const Point2D* vertices,
+    float delta_x,
+    float delta_y,
+    float eta_k,
+    float u_flt)
+{
+    uint32_t state_x = evaluate_ring_x(ring, vertices, delta_x, delta_y, eta_k, u_flt);
+    if (state_x != STATE_UNCERTAIN) {
+        return state_x;
+    }
+
+#if BOUND_MODE == 4
+    // Mode 4: Legacy single-ray baseline
+    return STATE_UNCERTAIN;
+#else
+    // Retry with orthogonal +y ray to eliminate horizontal ray direction artifacts
+    return evaluate_ring_y(ring, vertices, delta_x, delta_y, eta_k, u_flt);
+#endif
 }
 
 // Stage 2 Robust Geometric Refinement Kernel:

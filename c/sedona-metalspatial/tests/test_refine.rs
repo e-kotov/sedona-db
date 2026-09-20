@@ -280,6 +280,7 @@ impl SeededRng {
 
 /// Generates the adversarial polygon and probe suite matching T1/T2 requirements.
 /// Only unique pairs are generated.
+#[allow(clippy::type_complexity)]
 fn generate_adversarial_suite(
     cx: f64,
     cy: f64,
@@ -368,19 +369,17 @@ fn generate_adversarial_suite(
     });
 
     // Collect all probe points across adversarial perturbation scales
-    let mut probe_points = Vec::new();
-
-    // (a) Interior center points
-    probe_points.push((cx, cy));
-    probe_points.push((cx + r_poly * 0.01, cy + r_poly * 0.01));
-
-    // (b) Exterior points
-    probe_points.push((cx + r_poly * 3.0, cy + r_poly * 3.0));
-    probe_points.push((cx - r_poly * 3.0, cy - r_poly * 3.0));
-
-    // (c) Spike apex probes: ray shoots directly at spike apex (cx + 1.2 * r_poly, cy)
-    probe_points.push((cx + 0.5 * r_poly, cy));
-    probe_points.push((cx + 1.2 * r_poly, cy)); // exactly on apex (boundary)
+    let mut probe_points = vec![
+        // (a) Interior center points
+        (cx, cy),
+        (cx + r_poly * 0.01, cy + r_poly * 0.01),
+        // (b) Exterior points
+        (cx + r_poly * 3.0, cy + r_poly * 3.0),
+        (cx - r_poly * 3.0, cy - r_poly * 3.0),
+        // (c) Spike apex probes: ray shoots directly at spike apex (cx + 1.2 * r_poly, cy)
+        (cx + 0.5 * r_poly, cy),
+        (cx + 1.2 * r_poly, cy), // exactly on apex (boundary)
+    ];
 
     // (d) Mode 1 det crossing probes: points near x = cx on ray y = cy
     for &dx in &[-0.01, -0.001, -0.0001, 0.0, 0.0001, 0.001, 0.01] {
@@ -672,7 +671,7 @@ fn test_gate_2_full_scale_matrix() {
             let uncertain_rate = (uncertain as f64) / (candidate_pairs.len() as f64);
 
             println!(
-                "[GATE 2 CELL] Center: {:+1.0e} | R: {:1.0e} | Pairs: {:5} | Mismatches: {} | Uncertain: {:.2}% | asserts GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside",
+                "[GATE 2 CELL] Center: {:+.0e} | R: {:.0e} | Pairs: {:5} | Mismatches: {} | Uncertain: {:.2}% | asserts GPU-Inside => oracle-Inside and GPU-Outside => oracle-Outside",
                 cx,
                 r,
                 candidate_pairs.len(),
@@ -938,7 +937,7 @@ fn test_gate_5_and_6_swapped_and_container_inversion() {
     refiner.push_build(&poly_array).unwrap(); // polygon on build side
     refiner.finish_building().unwrap();
 
-    let probes = vec![
+    let probes = [
         make_point_wkb(5.0, 5.0),  // interior
         make_point_wkb(15.0, 5.0), // exterior
         make_point_wkb(10.0, 5.0), // boundary
@@ -1119,6 +1118,91 @@ fn test_gate_7_teeth_test_adversarial_v1_vs_v2_bound() {
 }
 
 #[test]
+fn test_gate_8_spanning_shallow_edges_sub_ulp_sweep() {
+    // Targets the certified-sign premise of the straddle test on spanning edges:
+    // the left endpoint v1 sits just left of the probe (x1 < -eta_k) and within a
+    // sub-ulp distance of the probe's y, while the right endpoint v2 is well outside
+    // the eta_k band. The true crossing of the +x ray then depends on sign(y1) alone.
+    // Mode 5 (trap skipped for x < -eta_k) is evaluated alongside for comparison.
+    let scales: [f64; 4] = [1e2, 1e4, 1e6, 1e7];
+    let mut ref_m0 = MetalSpatialRefiner::try_new_with_mode(0).unwrap();
+    let mut ref_m5 = MetalSpatialRefiner::try_new_with_mode(5).unwrap();
+    let mut total_m5_mismatches = 0usize;
+    let mut total_probes = 0usize;
+    let (mut unc0, mut unc5) = (0usize, 0usize);
+
+    for &center in &scales {
+        let (cx, cy) = (center, center);
+        let span = (center * 0.1f64).max(10.0);
+        let ulp_rel = (span as f32).next_up() as f64 - (span as f32) as f64;
+        let rise = 5e-6 * span; // ~8 eta_k: v2 stays outside the band
+
+        for si in -8i32..=8 {
+            let v1y = cy + (si as f64) * 0.125 * ulp_rel;
+            let poly_def = MultiPolyDef {
+                parts: vec![PolyPart {
+                    rings: vec![vec![
+                        (cx - 1e-3 * span, v1y),
+                        (cx + 1.999 * span, v1y + rise),
+                        (cx + 1.999 * span, cy + span),
+                        (cx - 1e-3 * span, cy + span),
+                    ]],
+                }],
+            };
+            let poly_wkb = make_multipoly_wkb(&poly_def);
+            let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+
+            let probes: Vec<(f64, f64)> = (-40i32..=40)
+                .map(|j| (cx, v1y + (j as f64) * 0.05 * ulp_rel))
+                .collect();
+            let probe_wkbs: Vec<Vec<u8>> =
+                probes.iter().map(|&(x, y)| make_point_wkb(x, y)).collect();
+            let probe_array: ArrayRef = Arc::new(BinaryArray::from(
+                probe_wkbs
+                    .iter()
+                    .map(|w| Some(w.as_slice()))
+                    .collect::<Vec<_>>(),
+            ));
+            let cand_b = vec![0u32; probes.len()];
+            let cand_p: Vec<u32> = (0..probes.len() as u32).collect();
+            let pairs: Vec<(u32, u32)> = cand_p.iter().map(|&p| (0u32, p)).collect();
+            total_probes += probes.len();
+
+            let run = |r: &mut MetalSpatialRefiner| {
+                r.clear().unwrap();
+                r.push_build(&poly_array).unwrap();
+                r.finish_building().unwrap();
+                let (mut vb, mut vp, mut ub, mut up) = (vec![], vec![], vec![], vec![]);
+                r.refine(
+                    &probe_array,
+                    ContainerSide::Build,
+                    &cand_b,
+                    &cand_p,
+                    &mut vb,
+                    &mut vp,
+                    &mut ub,
+                    &mut up,
+                )
+                .unwrap();
+                let v: Vec<(u32, u32)> = vb.into_iter().zip(vp).collect();
+                let u: Vec<(u32, u32)> = ub.into_iter().zip(up).collect();
+                verify_two_sided(&v, &u, &pairs, std::slice::from_ref(&poly_def), &probes)
+            };
+
+            let (_, u0, _, mm0) = run(&mut ref_m0);
+            let (_, u5, _, mm5) = run(&mut ref_m5);
+            unc0 += u0;
+            unc5 += u5;
+            total_m5_mismatches += mm5;
+            assert_eq!(mm0, 0, "Mode 0 mismatches at scale {center:e}, si={si}");
+        }
+    }
+    println!(
+        "GATE 8: {total_probes} probes | mode 0: {unc0} uncertain, 0 mismatches | mode 5 (unsound trap): {unc5} uncertain, {total_m5_mismatches} mismatches"
+    );
+}
+
+#[test]
 fn test_star_polygons_honest_uncertain_rate() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to create refiner");
     let mut rng = SeededRng::new(99999);
@@ -1210,6 +1294,139 @@ fn test_star_polygons_honest_uncertain_rate() {
     }
 }
 
+/// Helper for generating realistic multi-harmonic non-convex coastline boundaries
+fn generate_realistic_coastline_ring(
+    cx: f64,
+    cy: f64,
+    r_poly: f64,
+    n: usize,
+    rng: &mut SeededRng,
+) -> Vec<(f64, f64)> {
+    let mut ring = Vec::with_capacity(n);
+    let mut phases = [0.0f64; 16];
+    let mut amps = [0.0f64; 16];
+    for k in 1..16 {
+        phases[k] = rng.next_f64() * std::f64::consts::TAU;
+        amps[k] = (0.2 / (k as f64).powf(0.7)) * (0.8 + 0.4 * rng.next_f64());
+    }
+    for i in 0..n {
+        let theta = (i as f64) * std::f64::consts::TAU / (n as f64);
+        let mut rad_scale = 1.0;
+        for k in 1..16 {
+            rad_scale += amps[k] * (k as f64 * theta + phases[k]).cos();
+        }
+        let r = r_poly * rad_scale.max(0.2);
+        ring.push((cx + r * theta.cos(), cy + r * theta.sin()));
+    }
+    ring
+}
+
+#[test]
+#[ignore]
+fn test_realistic_multi_scale_uncertain_rate_benchmark() {
+    let mut rng = SeededRng::new(1234567);
+    let test_scales = [
+        ("Projected (EPSG:3857)", 500_000.0, 500_000.0, 10_000.0),
+        ("Geographic (lon/lat)", -74.0, 40.7, 0.5),
+    ];
+    let vertex_counts = [1_000, 5_000, 10_000, 25_000, 50_000, 100_000];
+    let num_probes = 5_000;
+
+    println!(
+        "\n======================================================================================================================"
+    );
+    println!(
+        " REALISTIC MULTI-SCALE UNCERTAIN RATE & TIMING BENCHMARK (1k - 100k Vertices, Random Probes)"
+    );
+    println!(" Comparing Legacy Unrestricted Band (Mode 4) vs. Certified Two-Ray (Mode 0)");
+    println!(
+        "======================================================================================================================\n"
+    );
+
+    for &(scale_name, cx, cy, r_poly) in &test_scales {
+        println!(
+            ">>> Coordinate System: {} | Center: ({:.1}, {:.1}) | Radius: {:.1}",
+            scale_name, cx, cy, r_poly
+        );
+        println!("{:-<96}", "");
+        println!(
+            "{:<10} | {:<14} | {:<12} | {:<12} | {:<12} | {:<10}",
+            "Vertices", "Mode", "Candidates", "Uncertain", "Unc Rate %", "GPU (ms)"
+        );
+        println!("{:-<96}", "");
+
+        for &n_verts in &vertex_counts {
+            let ring = generate_realistic_coastline_ring(cx, cy, r_poly, n_verts, &mut rng);
+            let poly_def = MultiPolyDef {
+                parts: vec![PolyPart { rings: vec![ring] }],
+            };
+            let poly_wkb = make_multipoly_wkb(&poly_def);
+            let poly_array: ArrayRef = Arc::new(BinaryArray::from(vec![Some(poly_wkb.as_slice())]));
+
+            let min_x = cx - r_poly * 1.5;
+            let max_x = cx + r_poly * 1.5;
+            let min_y = cy - r_poly * 1.5;
+            let max_y = cy + r_poly * 1.5;
+
+            let mut probe_wkbs = Vec::with_capacity(num_probes);
+            for _ in 0..num_probes {
+                let px = min_x + rng.next_f64() * (max_x - min_x);
+                let py = min_y + rng.next_f64() * (max_y - min_y);
+                probe_wkbs.push(make_point_wkb(px, py));
+            }
+
+            let probe_slices: Vec<Option<&[u8]>> =
+                probe_wkbs.iter().map(|w| Some(w.as_slice())).collect();
+            let probe_array: ArrayRef = Arc::new(BinaryArray::from(probe_slices));
+
+            let cand_b = vec![0u32; num_probes];
+            let cand_p: Vec<u32> = (0..num_probes as u32).collect();
+
+            for &(mode, mode_name) in &[(4, "Legacy (4)"), (0, "Two-Ray (0)")] {
+                let mut refiner =
+                    MetalSpatialRefiner::try_new_with_mode(mode).expect("Failed to create refiner");
+                refiner.push_build(&poly_array).unwrap();
+                refiner.finish_building().unwrap();
+
+                let mut vb = Vec::new();
+                let mut vp = Vec::new();
+                let mut ub = Vec::new();
+                let mut up = Vec::new();
+
+                let t_gpu_start = std::time::Instant::now();
+                refiner
+                    .refine(
+                        &probe_array,
+                        ContainerSide::Build,
+                        &cand_b,
+                        &cand_p,
+                        &mut vb,
+                        &mut vp,
+                        &mut ub,
+                        &mut up,
+                    )
+                    .unwrap();
+                let gpu_elapsed = t_gpu_start.elapsed();
+
+                let num_uncertain = ub.len();
+                let unc_rate = (num_uncertain as f64) / (num_probes as f64) * 100.0;
+
+                println!(
+                    "{:<10} | {:<14} | {:<12} | {:<12} | {:>11.3}% | {:>10.2}",
+                    n_verts,
+                    mode_name,
+                    num_probes,
+                    num_uncertain,
+                    unc_rate,
+                    gpu_elapsed.as_secs_f64() * 1000.0
+                );
+            }
+            println!("{:-<96}", "");
+        }
+        println!();
+    }
+}
+
 #[test]
 fn test_c1_ewkb_end_to_end_in_gpu_refiner() {
     let mut refiner = MetalSpatialRefiner::try_new().expect("Failed to create refiner");
@@ -1248,7 +1465,7 @@ fn test_c1_ewkb_end_to_end_in_gpu_refiner() {
     refiner.push_build(&poly_array).unwrap();
     refiner.finish_building().unwrap();
 
-    let probes = vec![
+    let probes = [
         make_point_wkb(5.0, 5.0),  // strictly interior to all 6
         make_point_wkb(15.0, 5.0), // strictly exterior to all 6
     ];
@@ -1431,7 +1648,7 @@ fn test_concurrent_multi_threaded_refiner() {
     let refiner = Arc::new(refiner);
 
     // Prepare probe points: some inside, some outside
-    let test_points = vec![
+    let test_points = [
         (25.0, 25.0), // inside
         (30.0, 30.0), // inside
         (5.0, 5.0),   // outside
@@ -1492,7 +1709,7 @@ fn test_concurrent_multi_threaded_refiner() {
                 &mut th_u_b,
                 &mut th_u_p,
             )
-            .expect(&format!("Thread {} failed refine", thread_id));
+            .unwrap_or_else(|e| panic!("Thread {} failed refine: {:?}", thread_id, e));
 
             assert_eq!(
                 th_v_p, expected_v_p,
