@@ -70,17 +70,110 @@ struct DecomposedPoint {
     uint32_t _padding;
 };
 
+// ----------------------------------------------------------------------------
+// Per-ring slab edge index (1D stabbing index along one axis)
+// ----------------------------------------------------------------------------
+// A ring with `num_slabs > 0` on an axis owns a uniform grid of slabs over
+// [lo, hi] on that axis. `slab_offsets[slab_start + s] .. slab_offsets[slab_start + s + 1]`
+// delimits the ring-local edge ids stored in `edge_ids` for slab s. The builder
+// (spatial_refiner.mm, build_ring_index) guarantees, for every probe displacement d
+// that select_slab() maps to slab s, that slab s lists EVERY edge that the linear
+// scan would not skip as a no-op, provided eta_k (padded) <= pad. See the soundness
+// note above select_slab().
+struct AxisIndex {
+    float lo;            // float <= (ring min on axis) - pad
+    float hi;            // float >= (ring max on axis) + pad
+    float inv_h;         // slabs per unit length; the grid is DEFINED by (lo, inv_h)
+    float pad;           // edges were inserted with their interval widened by pad
+    uint32_t slab_start; // offset into slab_offsets (num_slabs + 1 entries)
+    uint32_t num_slabs;  // 0: ring is not indexed on this axis
+};
+
+struct RingIndexRecord {
+    AxisIndex y_slabs; // serves the +x ray (stabbing query on y)
+    AxisIndex x_slabs; // serves the +y ray (stabbing query on x)
+};
+
+#define FLAG_X_INDEXED 1u    // some ring evaluated the +x ray through the slab index
+#define FLAG_Y_RAY 2u        // the +y retry ray ran on some ring
+#define FLAG_Y_INDEXED 4u    // the +y retry ray used the slab index
+#define FLAG_PAD_FALLBACK 8u // an indexed ring fell back to the linear scan (eta_k > pad etc.)
+
+#define SLAB_LINEAR 0u
+#define SLAB_INDEXED 1u
+
+// Chooses the edge subset for a ray whose stabbing coordinate (relative to the polygon
+// origin) is d. Returns SLAB_LINEAR when the caller must scan all edges, or
+// SLAB_INDEXED with [begin, end) into edge_ids (possibly empty).
+//
+// Soundness (design_refiner.md 2.3-2.4 frame). The per-edge body forms
+// c_i = fl(v_i.c - d) for the stabbing coordinate c and is a no-op (no trap, no
+// crossing) whenever both c_1, c_2 > eta_k or both < -eta_k. So an edge can matter only
+// if fl(cmin - d) <= eta_k and fl(cmax - d) >= -eta_k. Rounding is monotone and
+// succ(eta_k) is a normal float, so this implies cmin - d < succ(eta_k) and
+// cmax - d > -succ(eta_k) in exact arithmetic. q = fl(eta_k * (1 + 2^-20)) >= succ(eta_k),
+// and we only use the index when q <= pad, hence an edge that matters satisfies
+//     cmin - pad < d < cmax + pad.                                              (*)
+// (1) d < lo or d > hi: no edge satisfies (*) because lo <= ring_min - pad and
+//     hi >= ring_max + pad; zero crossings, no trap: identical to the linear scan.
+// (2) otherwise s = trunc(min(fl(fl(d - lo) * inv_h), K - 1)). The exact value
+//     t* = (d - lo) * inv_h obeys |t - t*| <= 2.0001 u t* + 1e-8 (the last term covers
+//     GPUs that flush subnormals; the builder enforces inv_h <= 1e30). With K <= 2^15
+//     this is < 0.008 for t* <= 2K; the builder lists each edge in slabs
+//     floor(t_lo - 1/32) .. floor(t_hi + 1/32) (clamped), where t_lo/t_hi are t* at the
+//     ends of (*) computed in f64 with a checked error <= 0.01. For t* > 2K both sides
+//     clamp to K - 1. Hence slab s lists every edge satisfying (*).
+// Each edge appears at most once per slab and exactly one slab is visited, so crossing
+// parity cannot double count. NaN / inf / tiny eta_k all route to SLAB_LINEAR.
+inline uint32_t select_slab(
+    AxisIndex ax,
+    float d,
+    float eta_k,
+    device const uint32_t* slab_offsets,
+    thread uint32_t& begin,
+    thread uint32_t& end,
+    thread uint32_t& flags)
+{
+    begin = 0;
+    end = 0;
+    if (ax.num_slabs == 0) {
+        return SLAB_LINEAR;
+    }
+    float q = eta_k * 1.00000095367431640625f; // 1 + 2^-20
+    if (!(q <= ax.pad) || !(eta_k >= 1e-30f) || !(d == d)) {
+        flags |= FLAG_PAD_FALLBACK;
+        return SLAB_LINEAR;
+    }
+    if (d < ax.lo || d > ax.hi) {
+        return SLAB_INDEXED; // empty range
+    }
+    float t = (d - ax.lo) * ax.inv_h;
+    t = metal::min(t, float(ax.num_slabs - 1));
+    uint32_t s = uint32_t(t);
+    begin = slab_offsets[ax.slab_start + s];
+    end = slab_offsets[ax.slab_start + s + 1];
+    return SLAB_INDEXED;
+}
+
 // Helper to evaluate a single linear ring against a probe point.
 // Uses ray-casting along the positive x-axis.
 // Adheres strictly to Section 2.3, 2.4, and 4.2 of design note v2.
 // Primary ray along positive x-axis: { (x, 0) : x >= 0 }
+//
+// The linear scan and the slab-indexed scan share this single loop body: they differ
+// only in how the edge id `i` is obtained, so the per-edge certified logic cannot drift.
+// The result is order independent (any trap -> Uncertain, else crossing parity).
 inline uint32_t evaluate_ring_x(
     RingRecord ring,
+    AxisIndex ax,
     device const Point2D* vertices,
+    device const uint32_t* slab_offsets,
+    device const uint32_t* edge_ids,
     float delta_x,
     float delta_y,
     float eta_k,
-    float u_flt)
+    float u_flt,
+    thread uint32_t& flags)
 {
     if (ring.vertex_count < 3) {
         return STATE_UNCERTAIN;
@@ -90,9 +183,18 @@ inline uint32_t evaluate_ring_x(
     uint32_t n = ring.vertex_count;
     uint32_t start = ring.vertex_start;
 
-    for (uint32_t i = 0; i < n; ++i) {
+    uint32_t begin, end;
+    bool indexed = select_slab(ax, delta_y, eta_k, slab_offsets, begin, end, flags) == SLAB_INDEXED;
+    uint32_t count = indexed ? (end - begin) : n;
+    if (indexed) {
+        flags |= FLAG_X_INDEXED;
+    }
+
+    for (uint32_t k = 0; k < count; ++k) {
+        uint32_t i = indexed ? edge_ids[begin + k] : k;
+        uint32_t j = (i + 1 == n) ? 0 : i + 1;
         Point2D v1 = vertices[start + i];
-        Point2D v2 = vertices[start + ((i + 1) % n)];
+        Point2D v2 = vertices[start + j];
 
         // Skip degenerate zero-length edges
         if (v1.x == v2.x && v1.y == v2.y) {
@@ -177,11 +279,15 @@ inline uint32_t evaluate_ring_x(
 // Secondary ray along positive y-axis: { (0, y) : y >= 0 }
 inline uint32_t evaluate_ring_y(
     RingRecord ring,
+    AxisIndex ax,
     device const Point2D* vertices,
+    device const uint32_t* slab_offsets,
+    device const uint32_t* edge_ids,
     float delta_x,
     float delta_y,
     float eta_k,
-    float u_flt)
+    float u_flt,
+    thread uint32_t& flags)
 {
     if (ring.vertex_count < 3) {
         return STATE_UNCERTAIN;
@@ -191,9 +297,19 @@ inline uint32_t evaluate_ring_y(
     uint32_t n = ring.vertex_count;
     uint32_t start = ring.vertex_start;
 
-    for (uint32_t i = 0; i < n; ++i) {
+    uint32_t begin, end;
+    bool indexed = select_slab(ax, delta_x, eta_k, slab_offsets, begin, end, flags) == SLAB_INDEXED;
+    uint32_t count = indexed ? (end - begin) : n;
+    flags |= FLAG_Y_RAY;
+    if (indexed) {
+        flags |= FLAG_Y_INDEXED;
+    }
+
+    for (uint32_t k = 0; k < count; ++k) {
+        uint32_t i = indexed ? edge_ids[begin + k] : k;
+        uint32_t j = (i + 1 == n) ? 0 : i + 1;
         Point2D v1 = vertices[start + i];
-        Point2D v2 = vertices[start + ((i + 1) % n)];
+        Point2D v2 = vertices[start + j];
 
         if (v1.x == v2.x && v1.y == v2.y) {
             continue;
@@ -247,13 +363,18 @@ inline uint32_t evaluate_ring_y(
 // Evaluates primary +x ray; on uncertainty, retries with orthogonal +y ray.
 inline uint32_t evaluate_ring(
     RingRecord ring,
+    RingIndexRecord ring_index,
     device const Point2D* vertices,
+    device const uint32_t* slab_offsets,
+    device const uint32_t* edge_ids,
     float delta_x,
     float delta_y,
     float eta_k,
-    float u_flt)
+    float u_flt,
+    thread uint32_t& flags)
 {
-    uint32_t state_x = evaluate_ring_x(ring, vertices, delta_x, delta_y, eta_k, u_flt);
+    uint32_t state_x = evaluate_ring_x(ring, ring_index.y_slabs, vertices, slab_offsets, edge_ids,
+                                       delta_x, delta_y, eta_k, u_flt, flags);
     if (state_x != STATE_UNCERTAIN) {
         return state_x;
     }
@@ -263,7 +384,8 @@ inline uint32_t evaluate_ring(
     return STATE_UNCERTAIN;
 #else
     // Retry with orthogonal +y ray to eliminate horizontal ray direction artifacts
-    return evaluate_ring_y(ring, vertices, delta_x, delta_y, eta_k, u_flt);
+    return evaluate_ring_y(ring, ring_index.x_slabs, vertices, slab_offsets, edge_ids,
+                           delta_x, delta_y, eta_k, u_flt, flags);
 #endif
 }
 
@@ -280,6 +402,9 @@ kernel void point_in_polygon_refine(
     device uint8_t*               out_states       [[buffer(6)]],
     constant uint32_t&            num_candidates   [[buffer(7)]],
     constant uint32_t&            num_polygons     [[buffer(8)]],
+    device const RingIndexRecord* ring_index       [[buffer(9)]],
+    device const uint32_t*        slab_offsets     [[buffer(10)]],
+    device const uint32_t*        edge_ids         [[buffer(11)]],
     uint                          thread_id        [[thread_position_in_grid]])
 {
     if (thread_id >= num_candidates) return;
@@ -339,6 +464,7 @@ kernel void point_in_polygon_refine(
     // Section 4.2 MultiPolygon & Part combination rules:
     bool any_part_inside = false;
     bool any_part_uncertain = false;
+    uint32_t flags = 0;
 
     for (uint32_t p = 0; p < poly.part_count; ++p) {
         PartRecord part = parts[poly.part_start + p];
@@ -349,7 +475,9 @@ kernel void point_in_polygon_refine(
 
         // Exterior ring (index 0 of part)
         RingRecord ext_ring = rings[part.ring_start];
-        uint32_t ext_state = evaluate_ring(ext_ring, vertices, delta_x, delta_y, eta_k, u_flt);
+        uint32_t ext_state = evaluate_ring(ext_ring, ring_index[part.ring_start], vertices,
+                                           slab_offsets, edge_ids, delta_x, delta_y, eta_k, u_flt,
+                                           flags);
 
         if (ext_state == STATE_OUTSIDE) {
             continue;
@@ -365,7 +493,9 @@ kernel void point_in_polygon_refine(
 
         for (uint32_t h = 1; h < part.ring_count; ++h) {
             RingRecord hole_ring = rings[part.ring_start + h];
-            uint32_t hole_state = evaluate_ring(hole_ring, vertices, delta_x, delta_y, eta_k, u_flt);
+            uint32_t hole_state = evaluate_ring(hole_ring, ring_index[part.ring_start + h], vertices,
+                                                slab_offsets, edge_ids, delta_x, delta_y, eta_k,
+                                                u_flt, flags);
             if (hole_state == STATE_INSIDE) {
                 in_hole = true;
                 break;
@@ -386,11 +516,13 @@ kernel void point_in_polygon_refine(
         }
     }
 
+    // The low 2 bits carry the state; bits 2..5 carry path diagnostics (FLAG_*), which the
+    // host strips (and optionally tallies) before states leave spatial_refiner.mm.
+    uint32_t state = STATE_OUTSIDE;
     if (any_part_inside) {
-        out_states[thread_id] = STATE_INSIDE;
+        state = STATE_INSIDE;
     } else if (any_part_uncertain) {
-        out_states[thread_id] = STATE_UNCERTAIN;
-    } else {
-        out_states[thread_id] = STATE_OUTSIDE;
+        state = STATE_UNCERTAIN;
     }
+    out_states[thread_id] = uint8_t(state | (flags << 2));
 }

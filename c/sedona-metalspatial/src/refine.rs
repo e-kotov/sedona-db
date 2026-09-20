@@ -38,6 +38,25 @@ pub enum ContainerSide {
     Either,
 }
 
+/// Test hook: counters describing the ring edge index and the kernel paths taken.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RefinerIndexStats {
+    pub rings_indexed_y: u64,
+    pub rings_indexed_x: u64,
+    pub entries: u64,
+    pub index_bytes: u64,
+    pub build_micros: u64,
+    pub pairs: u64,
+    pub pairs_x_indexed: u64,
+    pub pairs_y_ray: u64,
+    pub pairs_y_indexed: u64,
+    pub pairs_pad_fallback: u64,
+    pub indexed_vertices: u64,
+    pub vertices: u64,
+}
+
 pub struct MetalSpatialRefiner {
     #[cfg(target_os = "macos")]
     raw: *mut c_void,
@@ -125,6 +144,49 @@ impl MetalSpatialRefiner {
             device_name: dev_name,
             num_build_polygons: 0,
         })
+    }
+
+    /// Test hook: selects the ring edge-index mode before `finish_building()`:
+    /// 0 = off (linear scan of every ring), 1 = y-slabs (+x ray only),
+    /// 2 = y- and x-slabs (both rays; the production default).
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn set_index_mode(&mut self, mode: i32) -> Result<(), MetalSpatialError> {
+        let rc = unsafe { ffi::SedonaMetalRefinerSetIndexMode(self.raw, mode) };
+        if rc != 0 {
+            return Err(MetalSpatialError::InvalidState(self.last_error()));
+        }
+        Ok(())
+    }
+
+    /// Test hook: scales the index pad before `finish_building()`. Values below 1 make the
+    /// kernel's `eta_k <= pad` guard fail so indexed rings fall back to the linear scan.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn set_index_pad_scale(&mut self, scale: f32) {
+        unsafe { ffi::SedonaMetalRefinerSetIndexPadScale(self.raw, scale) };
+    }
+
+    /// Test hook: index build and kernel path counters.
+    #[cfg(feature = "test-internals")]
+    #[doc(hidden)]
+    pub fn index_stats(&self) -> RefinerIndexStats {
+        let mut raw = [0u64; 12];
+        unsafe { ffi::SedonaMetalRefinerGetStats(self.raw, raw.as_mut_ptr(), raw.len() as u32) };
+        RefinerIndexStats {
+            rings_indexed_y: raw[0],
+            rings_indexed_x: raw[1],
+            entries: raw[2],
+            index_bytes: raw[3],
+            build_micros: raw[4],
+            pairs: raw[5],
+            pairs_x_indexed: raw[6],
+            pairs_y_ray: raw[7],
+            pairs_y_indexed: raw[8],
+            pairs_pad_fallback: raw[9],
+            indexed_vertices: raw[10],
+            vertices: raw[11],
+        }
     }
 
     /// Returns the name of the Metal device running the refiner.

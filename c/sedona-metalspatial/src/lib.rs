@@ -18,6 +18,8 @@
 pub mod flattener;
 pub mod refine;
 
+#[cfg(feature = "test-internals")]
+pub use refine::RefinerIndexStats;
 pub use refine::{ContainerSide, MetalSpatialRefiner};
 
 #[cfg(target_os = "macos")]
@@ -61,6 +63,12 @@ pub mod ffi {
             vertex_count: u32,
         ) -> i32;
         pub fn SedonaMetalRefinerFinish(refiner: *mut c_void) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerSetIndexMode(refiner: *mut c_void, mode: i32) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerSetIndexPadScale(refiner: *mut c_void, scale: f32) -> i32;
+        #[cfg(feature = "test-internals")]
+        pub fn SedonaMetalRefinerGetStats(refiner: *mut c_void, out: *mut u64, n: u32) -> i32;
         pub fn SedonaMetalRefinerRefine(
             refiner: *mut c_void,
             points: *const c_void,

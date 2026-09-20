@@ -45,6 +45,12 @@ int SedonaMetalRefinerPushPolygons(void* refiner, const void* polys, uint32_t po
                                    const void* rings, uint32_t ring_count,
                                    const void* vertices, uint32_t vertex_count);
 int SedonaMetalRefinerFinish(void* refiner);
+// Ring edge-index mode (0 off, 1 y-slabs, 2 y+x slabs); call before Finish.
+int SedonaMetalRefinerSetIndexMode(void* refiner, int mode);
+// Test hook: scales the index pad; call before Finish.
+int SedonaMetalRefinerSetIndexPadScale(void* refiner, float scale);
+// Copies up to n diagnostic counters (see MetalSpatialRefiner::get_stats).
+int SedonaMetalRefinerGetStats(void* refiner, uint64_t* out, uint32_t n);
 int SedonaMetalRefinerRefine(void* refiner, const void* points, uint32_t point_count,
                              const uint32_t* candidate_build_indices,
                              const uint32_t* candidate_probe_indices,

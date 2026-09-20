@@ -275,6 +275,32 @@ int SedonaMetalRefinerFinish(void* refiner) {
   }
 }
 
+int SedonaMetalRefinerSetIndexMode(void* refiner, int mode) {
+  if (!refiner) return -1;
+  try {
+    static_cast<MetalSpatialRefiner*>(refiner)->set_index_mode(mode);
+    return 0;
+  } catch (...) {
+    return -2;
+  }
+}
+
+int SedonaMetalRefinerSetIndexPadScale(void* refiner, float scale) {
+  if (!refiner) return -1;
+  static_cast<MetalSpatialRefiner*>(refiner)->set_index_pad_scale(scale);
+  return 0;
+}
+
+int SedonaMetalRefinerGetStats(void* refiner, uint64_t* out, uint32_t n) {
+  if (!refiner || !out) return -1;
+  try {
+    static_cast<MetalSpatialRefiner*>(refiner)->get_stats(out, n);
+    return 0;
+  } catch (...) {
+    return -2;
+  }
+}
+
 int SedonaMetalRefinerRefine(void* refiner, const void* points, uint32_t point_count,
                              const uint32_t* candidate_build_indices,
                              const uint32_t* candidate_probe_indices,

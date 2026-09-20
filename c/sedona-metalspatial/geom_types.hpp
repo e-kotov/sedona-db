@@ -112,6 +112,21 @@ struct RingRecord {
   uint32_t vertex_count;
 };
 
+// Per-ring slab edge index (mirrors refine.metal). `num_slabs == 0` means "not indexed".
+struct AxisIndex {
+  float lo;
+  float hi;
+  float inv_h;
+  float pad;
+  uint32_t slab_start;
+  uint32_t num_slabs;
+};
+
+struct RingIndexRecord {
+  AxisIndex y_slabs;  // stabbing query on y for the +x ray
+  AxisIndex x_slabs;  // stabbing query on x for the +y retry ray
+};
+
 struct DecomposedPoint {
   float hi_x;
   float hi_y;
