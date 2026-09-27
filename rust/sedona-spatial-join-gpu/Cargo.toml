@@ -59,12 +59,12 @@ log = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-datafusion = { workspace = true, features = ["sql"] }
+datafusion = { workspace = true, features = ["sql", "parquet"] }
 datafusion-physical-plan = { workspace = true }
 rstest = { workspace = true }
 sedona-testing = { workspace = true }
 sedona-geos = { workspace = true }
 wkt = { workspace = true }
-tokio = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 rand = { workspace = true }
 env_logger = { workspace = true }
