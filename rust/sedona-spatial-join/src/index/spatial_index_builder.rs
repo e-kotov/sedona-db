@@ -51,6 +51,10 @@ pub struct SpatialJoinBuildMetrics {
     pub build_time: metrics::Time,
     /// Memory used by the spatial-index in bytes
     pub build_mem_used: metrics::Gauge,
+    /// Candidate pairs verified directly on GPU
+    pub gpu_verified: metrics::Count,
+    /// Candidate pairs resolved on CPU fallback
+    pub cpu_resolved: metrics::Count,
 }
 
 impl SpatialJoinBuildMetrics {
@@ -58,6 +62,8 @@ impl SpatialJoinBuildMetrics {
         Self {
             build_time: MetricBuilder::new(metrics).subset_time("build_time", partition),
             build_mem_used: MetricBuilder::new(metrics).gauge("build_mem_used", partition),
+            gpu_verified: MetricBuilder::new(metrics).counter("gpu_verified", partition),
+            cpu_resolved: MetricBuilder::new(metrics).counter("cpu_resolved", partition),
         }
     }
 }

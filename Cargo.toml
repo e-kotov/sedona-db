@@ -20,6 +20,7 @@ members = [
     "c/sedona-geoarrow-c",
     "c/sedona-geos",
     "c/sedona-libgpuspatial",
+    "c/sedona-metalspatial",
     "c/sedona-gdal",
     "c/sedona-proj",
     "c/sedona-s2geography",
@@ -175,6 +176,7 @@ sedona-gdal = { version = "0.5.0", path = "c/sedona-gdal", default-features = fa
 sedona-geoarrow-c = { version = "0.5.0", path = "c/sedona-geoarrow-c" }
 sedona-geos = { version = "0.5.0", path = "c/sedona-geos" }
 sedona-libgpuspatial = { version = "0.5.0", path = "c/sedona-libgpuspatial" }
+sedona-metalspatial = { version = "0.5.0", path = "c/sedona-metalspatial" }
 sedona-proj = { version = "0.5.0", path = "c/sedona-proj", default-features = false }
 sedona-s2geography = { version = "0.5.0", path = "c/sedona-s2geography" }
 sedona-tg = { version = "0.5.0", path = "c/sedona-tg" }

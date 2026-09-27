@@ -75,6 +75,19 @@ impl SpatialJoinPhysicalPlanner for GpuSpatialJoinPhysicalPlanner {
             return Ok(None);
         }
 
+        if !crate::backend::PlatformSpatialIndex::is_available() {
+            if gpu_options.fallback_to_cpu {
+                log::warn!(
+                    "Falling back to CPU spatial join as GPU spatial acceleration is not available"
+                );
+                return Ok(None);
+            } else {
+                return Err(DataFusionError::Plan(
+                    "GPU spatial join is enabled, but GPU hardware or acceleration engine is unavailable".into(),
+                ));
+            }
+        }
+
         if !supported {
             if gpu_options.fallback_to_cpu {
                 log::warn!("Falling back to CPU spatial join as the spatial predicate is not supported on GPU");
@@ -84,15 +97,66 @@ impl SpatialJoinPhysicalPlanner for GpuSpatialJoinPhysicalPlanner {
             }
         }
 
-        let should_swap = !matches!(
+        let is_within_or_covered_by = matches!(
             args.spatial_predicate,
-            SpatialPredicate::KNearestNeighbors(_)
-        ) && args.join_type.supports_swap()
-            && should_swap_join_order(
-                args.join_options,
-                args.physical_left.as_ref(),
-                args.physical_right.as_ref(),
-            )?;
+            SpatialPredicate::Relation(RelationPredicate {
+                relation_type: SpatialRelationType::Within | SpatialRelationType::CoveredBy,
+                ..
+            })
+        );
+
+        let is_contains_or_covers = matches!(
+            args.spatial_predicate,
+            SpatialPredicate::Relation(RelationPredicate {
+                relation_type: SpatialRelationType::Contains | SpatialRelationType::Covers,
+                ..
+            })
+        );
+
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        let is_metal = true;
+        #[cfg(not(all(target_os = "macos", feature = "metal")))]
+        let is_metal = false;
+
+        let should_swap = if is_metal {
+            if is_within_or_covered_by {
+                if args.join_type.supports_swap() {
+                    true
+                } else if gpu_options.fallback_to_cpu {
+                    log::warn!(
+                        "Falling back to CPU spatial join as Within/CoveredBy join order cannot be swapped"
+                    );
+                    return Ok(None);
+                } else {
+                    return Err(DataFusionError::Plan(
+                        "Within/CoveredBy relation requires input swap for GPU acceleration, but join type does not support swap".into(),
+                    ));
+                }
+            } else if is_contains_or_covers {
+                // On Metal, polygon container must remain on build side for GPU refinement
+                false
+            } else {
+                !matches!(
+                    args.spatial_predicate,
+                    SpatialPredicate::KNearestNeighbors(_)
+                ) && args.join_type.supports_swap()
+                    && should_swap_join_order(
+                        args.join_options,
+                        args.physical_left.as_ref(),
+                        args.physical_right.as_ref(),
+                    )?
+            }
+        } else {
+            !matches!(
+                args.spatial_predicate,
+                SpatialPredicate::KNearestNeighbors(_)
+            ) && args.join_type.supports_swap()
+                && should_swap_join_order(
+                    args.join_options,
+                    args.physical_left.as_ref(),
+                    args.physical_right.as_ref(),
+                )?
+        };
 
         let exec = SpatialJoinExec::try_new(
             args.physical_left.clone(),
@@ -137,16 +201,7 @@ pub fn is_spatial_predicate_supported(
             right,
             relation_type,
         }) => {
-            if !matches!(
-                relation_type,
-                SpatialRelationType::Intersects
-                    | SpatialRelationType::Contains
-                    | SpatialRelationType::Within
-                    | SpatialRelationType::Covers
-                    | SpatialRelationType::CoveredBy
-                    | SpatialRelationType::Touches
-                    | SpatialRelationType::Equals
-            ) {
+            if !crate::backend::PlatformSpatialRefiner::supports_predicate(relation_type) {
                 return Ok(false);
             }
 

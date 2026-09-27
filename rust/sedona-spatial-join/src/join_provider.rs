@@ -63,6 +63,11 @@ pub trait SpatialJoinProvider: std::fmt::Debug + Send + Sync {
     ) -> usize;
 
     fn evaluated_array_factory(&self) -> Arc<dyn EvaluatedGeometryArrayFactory>;
+
+    /// Return the name of the join provider (e.g. "Cpu", "Gpu")
+    fn name(&self) -> &str {
+        "Unknown"
+    }
 }
 
 /// Default implementation of the [SpatialJoinProvider]
@@ -70,6 +75,10 @@ pub trait SpatialJoinProvider: std::fmt::Debug + Send + Sync {
 pub struct DefaultSpatialJoinProvider;
 
 impl SpatialJoinProvider for DefaultSpatialJoinProvider {
+    fn name(&self) -> &str {
+        "Cpu"
+    }
+
     fn try_new_spatial_index_builder(
         &self,
         schema: SchemaRef,

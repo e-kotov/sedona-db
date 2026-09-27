@@ -180,7 +180,7 @@ impl SedonaContext {
 
             // Register the GPU join after the default planner
             // If a query is not supported, it falls back to the default planner.
-            #[cfg(feature = "gpu")]
+            #[cfg(any(feature = "gpu", feature = "metal"))]
             {
                 use sedona_spatial_join_gpu::physical_planner::GpuSpatialJoinPhysicalPlanner;
 

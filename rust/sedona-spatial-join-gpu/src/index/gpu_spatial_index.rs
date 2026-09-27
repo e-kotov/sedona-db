@@ -15,22 +15,23 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::backend::{PlatformSpatialIndex, PlatformSpatialRefiner};
 use crate::options::GpuOptions;
 use arrow::array::BooleanBufferBuilder;
-use arrow_array::{ArrayRef, RecordBatch};
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use datafusion_common::{DataFusionError, Result};
 use parking_lot::Mutex;
-use sedona_common::ExecutionMode;
+use sedona_common::{ExecutionMode, SpatialJoinOptions};
 use sedona_expr::statistics::GeoStatistics;
-use sedona_libgpuspatial::{
-    GpuSpatialIndex, GpuSpatialOptions, GpuSpatialRefiner, GpuSpatialRelationPredicate,
-};
 use sedona_spatial_join::evaluated_batch::EvaluatedBatch;
 use sedona_spatial_join::index::spatial_index::SpatialIndex;
-use sedona_spatial_join::index::QueryResultMetrics;
-use sedona_spatial_join::spatial_predicate::SpatialRelationType;
+use sedona_spatial_join::index::spatial_index_builder::SpatialJoinBuildMetrics;
+use sedona_spatial_join::index::{IndexQueryResult, QueryResultMetrics};
+use sedona_spatial_join::refine::{
+    DefaultIndexQueryResultRefinerFactory, IndexQueryResultRefiner, IndexQueryResultRefinerFactory,
+};
 use sedona_spatial_join::SpatialPredicate;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -40,9 +41,11 @@ use wkb::reader::Wkb;
 pub struct GPUSpatialIndex {
     pub(crate) schema: SchemaRef,
     /// GPU spatial index for performing GPU-accelerated filtering
-    pub(crate) index: Arc<GpuSpatialIndex>,
+    pub(crate) index: Arc<PlatformSpatialIndex>,
     /// GPU spatial refiner for performing GPU-accelerated refinement
-    pub(crate) refiner: Arc<GpuSpatialRefiner>,
+    pub(crate) refiner: Arc<PlatformSpatialRefiner>,
+    /// CPU spatial refiner for resolving uncertain/ambiguous pairs
+    pub(crate) cpu_refiner: Arc<dyn IndexQueryResultRefiner>,
     pub(crate) spatial_predicate: SpatialPredicate,
     /// Indexed batches containing evaluated geometry arrays. It contains the original record
     /// batches and geometry arrays obtained by evaluating the geometry expression on the build side.
@@ -56,89 +59,40 @@ pub struct GPUSpatialIndex {
     /// The last finished probe thread will produce the extra output batches for unmatched
     /// build side when running left-outer joins. See also [`report_probe_completed`].
     pub(crate) probe_threads_counter: AtomicUsize,
+    pub(crate) build_metrics: SpatialJoinBuildMetrics,
 }
+
 impl GPUSpatialIndex {
     pub fn empty(
         spatial_predicate: SpatialPredicate,
+        options: SpatialJoinOptions,
         schema: SchemaRef,
         gpu_options: GpuOptions,
         visited_build_side: Option<Mutex<Vec<BooleanBufferBuilder>>>,
         probe_threads_counter: AtomicUsize,
     ) -> Result<Self> {
-        let gpu_libspatial_options = GpuSpatialOptions {
-            cuda_use_memory_pool: gpu_options.use_memory_pool,
-            cuda_memory_pool_init_percent: gpu_options.memory_pool_init_percentage as i32,
-            concurrency: 1,
-            device_id: gpu_options.device_id as i32,
-            compress_bvh: gpu_options.compress_bvh,
-            pipeline_batches: gpu_options.pipeline_batches as u32,
-        };
+        let index = PlatformSpatialIndex::try_new(&gpu_options)?;
+        let refiner = PlatformSpatialRefiner::try_new(&gpu_options)?;
+        let cpu_refiner_factory = DefaultIndexQueryResultRefinerFactory;
+        let cpu_refiner = cpu_refiner_factory.create_refiner(
+            &spatial_predicate,
+            options,
+            0,
+            GeoStatistics::empty(),
+        )?;
 
         Ok(Self {
             schema,
             spatial_predicate,
-            index: Arc::new(
-                GpuSpatialIndex::try_new(&gpu_libspatial_options)
-                    .map_err(|e| DataFusionError::Execution(e.to_string()))?,
-            ),
-            refiner: Arc::new(
-                GpuSpatialRefiner::try_new(&gpu_libspatial_options)
-                    .map_err(|e| DataFusionError::Execution(e.to_string()))?,
-            ),
+            index: Arc::new(index),
+            refiner: Arc::new(refiner),
+            cpu_refiner,
             indexed_batches: vec![],
             data_id_to_batch_pos: vec![],
             visited_build_side,
             probe_threads_counter,
+            build_metrics: SpatialJoinBuildMetrics::default(),
         })
-    }
-
-    fn refine(
-        &self,
-        probe_geoms: &ArrayRef,
-        predicate: &SpatialPredicate,
-        build_indices: &mut Vec<u32>,
-        probe_indices: &mut Vec<u32>,
-    ) -> Result<()> {
-        match predicate {
-            SpatialPredicate::Relation(rel_p) => {
-                self.refiner
-                    .refine(
-                        probe_geoms,
-                        Self::convert_relation_type(&rel_p.relation_type)?,
-                        build_indices,
-                        probe_indices,
-                    )
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "GPU spatial refinement failed: {:?}",
-                            e
-                        ))
-                    })?;
-                Ok(())
-            }
-            _ => Err(DataFusionError::NotImplemented(
-                "Only Relation predicate is supported for GPU spatial query".to_string(),
-            )),
-        }
-    }
-    // Translate Sedona SpatialRelationType to GpuSpatialRelationPredicate
-    fn convert_relation_type(t: &SpatialRelationType) -> Result<GpuSpatialRelationPredicate> {
-        match t {
-            SpatialRelationType::Equals => Ok(GpuSpatialRelationPredicate::Equals),
-            SpatialRelationType::Touches => Ok(GpuSpatialRelationPredicate::Touches),
-            SpatialRelationType::Contains => Ok(GpuSpatialRelationPredicate::Contains),
-            SpatialRelationType::Covers => Ok(GpuSpatialRelationPredicate::Covers),
-            SpatialRelationType::Intersects => Ok(GpuSpatialRelationPredicate::Intersects),
-            SpatialRelationType::Within => Ok(GpuSpatialRelationPredicate::Within),
-            SpatialRelationType::CoveredBy => Ok(GpuSpatialRelationPredicate::CoveredBy),
-            _ => {
-                // This should not happen as we check for supported predicates earlier
-                Err(DataFusionError::Execution(format!(
-                    "Unsupported spatial relation type for GPU: {:?}",
-                    t
-                )))
-            }
-        }
     }
 }
 
@@ -151,6 +105,7 @@ impl SpatialIndex for GPUSpatialIndex {
     fn num_indexed_batches(&self) -> usize {
         self.indexed_batches.len()
     }
+
     fn get_indexed_batch(&self, batch_idx: usize) -> &RecordBatch {
         &self.indexed_batches[batch_idx].batch
     }
@@ -158,7 +113,7 @@ impl SpatialIndex for GPUSpatialIndex {
     /// This method implements [`SpatialIndex::query_batch`] with GPU-accelerated spatial filtering
     /// and refinement. It takes a batch of probe geometries and a range of row indices to process,
     /// performs a spatial query on the GPU to find candidate matches,
-    /// refines the candidates using the GPU refiner,
+    /// refines the candidates using the GPU refiner, resolves uncertain pairs via CPU refiner,
     /// and returns the matching build batch positions and probe indices.
     async fn query_batch(
         &self,
@@ -193,32 +148,121 @@ impl SpatialIndex for GPUSpatialIndex {
             })
             .collect();
 
-        let (mut gpu_build_indices, mut gpu_probe_indices) =
-            index.probe(rects.as_ref()).map_err(|e| {
-                DataFusionError::Execution(format!("GPU spatial query failed: {:?}", e))
-            })?;
+        let (gpu_build_indices, gpu_probe_indices) = index.probe(rects.as_ref()).map_err(|e| {
+            DataFusionError::Execution(format!("GPU spatial query failed: {:?}", e))
+        })?;
 
         assert_eq!(gpu_build_indices.len(), gpu_probe_indices.len());
-
         let candidate_count = gpu_build_indices.len();
 
-        self.refine(
-            evaluated_batch.geom_array.geometry_array(),
+        // P1: Slice probe geometries to match range so that relative probe_idx in 0..range.len()
+        // maps to the corresponding element in the sliced array.
+        let sliced_probe_geoms = evaluated_batch
+            .geom_array
+            .geometry_array()
+            .slice(range.start, range.len());
+
+        let outcome = self.refiner.refine(
+            &sliced_probe_geoms,
             &self.spatial_predicate,
-            &mut gpu_build_indices,
-            &mut gpu_probe_indices,
+            &gpu_build_indices,
+            &gpu_probe_indices,
         )?;
 
-        assert_eq!(gpu_build_indices.len(), gpu_probe_indices.len());
+        // P6: Deterministic output order:
+        // 1. Resolve uncertain pairs via sorted linear group-by
+        let mut cpu_resolved_pairs: Vec<(u32, (i32, i32))> = Vec::new();
 
-        let total_count = gpu_build_indices.len();
+        let num_uncertain = outcome.uncertain_build.len();
 
-        for (build_idx, probe_idx) in gpu_build_indices.iter().zip(gpu_probe_indices.iter()) {
-            let data_id = *build_idx as usize;
-            let (batch_idx, row_idx) = self.data_id_to_batch_pos[data_id];
-            build_batch_positions.push((batch_idx, row_idx));
+        if num_uncertain > 0 {
+            let mut uncertain_pairs: Vec<(u32, u32)> = outcome
+                .uncertain_probe
+                .into_iter()
+                .zip(outcome.uncertain_build)
+                .collect();
+            uncertain_pairs.sort_unstable();
+
+            let mut i = 0;
+            while i < uncertain_pairs.len() {
+                let current_probe_idx = uncertain_pairs[i].0;
+                let mut group_build_ids = Vec::new();
+                while i < uncertain_pairs.len() && uncertain_pairs[i].0 == current_probe_idx {
+                    group_build_ids.push(uncertain_pairs[i].1);
+                    i += 1;
+                }
+
+                let probe_row = range.start + current_probe_idx as usize;
+                let Some(probe_wkb) = evaluated_batch.geom_array.wkb(probe_row) else {
+                    continue;
+                };
+
+                let mut query_results = Vec::with_capacity(group_build_ids.len());
+                for build_id in group_build_ids {
+                    let pos = self.data_id_to_batch_pos[build_id as usize];
+                    let (b_idx, r_idx) = pos;
+                    let indexed_batch = &self.indexed_batches[b_idx as usize];
+                    if let Some(build_wkb) = indexed_batch.geom_array.wkb(r_idx as usize) {
+                        query_results.push(IndexQueryResult {
+                            wkb: build_wkb,
+                            distance: None,
+                            geom_idx: build_id as usize,
+                            position: pos,
+                        });
+                    }
+                }
+
+                if !query_results.is_empty() {
+                    let mut matches = self.cpu_refiner.refine(probe_wkb, &query_results)?;
+                    matches.sort_unstable();
+                    for pos in matches {
+                        cpu_resolved_pairs.push((current_probe_idx, pos));
+                    }
+                }
+            }
+        }
+
+        // 2. Verified pairs from GPU (sorted by probe_idx, then build pos)
+        let mut verified_pairs: Vec<(u32, (i32, i32))> =
+            Vec::with_capacity(outcome.verified_build.len());
+        for (&build_id, &probe_idx) in outcome
+            .verified_build
+            .iter()
+            .zip(outcome.verified_probe.iter())
+        {
+            let pos = self.data_id_to_batch_pos[build_id as usize];
+            verified_pairs.push((probe_idx, pos));
+        }
+        verified_pairs.sort_unstable();
+
+        let gpu_verified_count = verified_pairs.len();
+        self.build_metrics.gpu_verified.add(gpu_verified_count);
+        let cpu_resolved_count = cpu_resolved_pairs.len();
+        self.build_metrics.cpu_resolved.add(cpu_resolved_count);
+        let total_count = gpu_verified_count + cpu_resolved_count;
+
+        // P8: Observability logging
+        let gpu_outside_count = candidate_count.saturating_sub(gpu_verified_count + num_uncertain);
+        log::debug!(
+            "query_batch: candidates={}, verified={}, outside={}, uncertain_resolved={}, total={}",
+            candidate_count,
+            gpu_verified_count,
+            gpu_outside_count,
+            cpu_resolved_count,
+            total_count
+        );
+
+        // Emit verified pairs first, then CPU-resolved pairs, each in sorted order
+        for (probe_idx, pos) in verified_pairs {
+            build_batch_positions.push(pos);
             probe_indices.push(range.start as u32 + probe_idx);
         }
+
+        for (probe_idx, pos) in cpu_resolved_pairs {
+            build_batch_positions.push(pos);
+            probe_indices.push(range.start as u32 + probe_idx);
+        }
+
         Ok((
             QueryResultMetrics {
                 count: total_count,
@@ -227,11 +271,14 @@ impl SpatialIndex for GPUSpatialIndex {
             range.end,
         ))
     }
+
     fn need_more_probe_stats(&self) -> bool {
-        false
+        self.cpu_refiner.need_more_probe_stats()
     }
 
-    fn merge_probe_stats(&self, _stats: GeoStatistics) {}
+    fn merge_probe_stats(&self, stats: GeoStatistics) {
+        self.cpu_refiner.merge_probe_stats(stats);
+    }
 
     fn visited_build_side(&self) -> Option<&Mutex<Vec<BooleanBufferBuilder>>> {
         self.visited_build_side.as_ref()
@@ -242,7 +289,8 @@ impl SpatialIndex for GPUSpatialIndex {
     }
 
     fn get_refiner_mem_usage(&self) -> usize {
-        0
+        // P8: Sum GPU refiner buffers and CPU refiner memory cache
+        self.refiner.get_refiner_mem_usage() + self.cpu_refiner.mem_usage()
     }
 
     fn get_actual_execution_mode(&self) -> ExecutionMode {
@@ -265,7 +313,7 @@ impl SpatialIndex for GPUSpatialIndex {
 }
 
 #[cfg(test)]
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", all(target_os = "macos", feature = "metal")))]
 mod tests {
     use crate::index::gpu_spatial_index_builder::GPUSpatialIndexBuilder;
     use crate::options::GpuOptions;
@@ -274,8 +322,8 @@ mod tests {
     use datafusion_common::JoinType;
     use datafusion_physical_expr::expressions::Column;
     use futures::Stream;
+    use sedona_common::SpatialJoinOptions;
     use sedona_expr::statistics::GeoStatistics;
-    use sedona_libgpuspatial::{GpuSpatialIndex as RawGpuSpatialIndex, GpuSpatialOptions};
     use sedona_schema::datatypes::WKB_GEOMETRY;
     use sedona_spatial_join::evaluated_batch::evaluated_batch_stream::{
         EvaluatedBatchStream, SendableEvaluatedBatchStream,
@@ -295,15 +343,7 @@ mod tests {
     use std::vec::IntoIter;
 
     fn gpu_available() -> bool {
-        RawGpuSpatialIndex::try_new(&GpuSpatialOptions {
-            cuda_use_memory_pool: true,
-            cuda_memory_pool_init_percent: 10,
-            concurrency: 1,
-            device_id: 0,
-            compress_bvh: false,
-            pipeline_batches: 1,
-        })
-        .is_ok()
+        crate::backend::PlatformSpatialIndex::is_available()
     }
 
     pub struct SingleBatchStream {
@@ -428,6 +468,7 @@ mod tests {
         let mut builder = Box::new(GPUSpatialIndexBuilder::new(
             schema.clone(),
             spatial_predicate,
+            SpatialJoinOptions::default(),
             options,
             JoinType::Inner,
             4,
@@ -468,6 +509,7 @@ mod tests {
         let builder = GPUSpatialIndexBuilder::new(
             schema.clone(),
             spatial_predicate,
+            SpatialJoinOptions::default(),
             options,
             JoinType::Inner,
             4,
@@ -525,6 +567,7 @@ mod tests {
         let builder = GPUSpatialIndexBuilder::new(
             schema.clone(),
             spatial_predicate,
+            SpatialJoinOptions::default(),
             gpu_options,
             JoinType::Inner,
             4,
@@ -597,6 +640,7 @@ mod tests {
         let builder = GPUSpatialIndexBuilder::new(
             schema.clone(),
             spatial_predicate,
+            SpatialJoinOptions::default(),
             options,
             JoinType::Inner,
             1,
@@ -700,6 +744,7 @@ mod tests {
         let builder = GPUSpatialIndexBuilder::new(
             schema.clone(),
             spatial_predicate,
+            SpatialJoinOptions::default(),
             gpu_options,
             JoinType::Inner,
             4,
@@ -776,5 +821,123 @@ mod tests {
 
         // The query processed all 4 probe points
         assert_eq!(next_idx, 4);
+    }
+
+    #[tokio::test]
+    async fn test_query_batch_range_start_greater_than_zero() {
+        if !gpu_available() {
+            return;
+        }
+
+        let gpu_options = GpuOptions {
+            enable: true,
+            concat_build: false,
+            ..Default::default()
+        };
+        let metrics = SpatialJoinBuildMetrics::default();
+
+        let spatial_predicate = SpatialPredicate::Relation(RelationPredicate::new(
+            Arc::new(Column::new("geom", 0)),
+            Arc::new(Column::new("geom", 1)),
+            SpatialRelationType::Intersects,
+        ));
+
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "geom",
+            DataType::Binary,
+            true,
+        )]));
+
+        let builder = GPUSpatialIndexBuilder::new(
+            schema.clone(),
+            spatial_predicate,
+            SpatialJoinOptions::default(),
+            gpu_options,
+            JoinType::Inner,
+            1,
+            metrics,
+        );
+
+        let build_geom_batch = create_array(
+            &[
+                Some("POLYGON ((0 0, 0 10, 10 10, 10 0, 0 0))"),
+                Some("POLYGON ((20 20, 20 30, 30 30, 30 20, 20 20))"),
+                Some("POLYGON ((40 40, 40 50, 50 50, 50 40, 40 40))"),
+            ],
+            &WKB_GEOMETRY,
+        );
+        let build_batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(build_geom_batch.clone())]).unwrap();
+        let evaluated_build = EvaluatedBatch {
+            batch: build_batch,
+            geom_array: EvaluatedGeometryArray::try_new(build_geom_batch, &WKB_GEOMETRY).unwrap(),
+        };
+
+        let index = build_index(builder, evaluated_build, schema.clone()).await;
+
+        // Probe side with 6 points
+        let probe_geoms = &[
+            Some("POINT (5 5)"),     // row 0: matches poly 0
+            Some("POINT (100 100)"), // row 1: no match
+            Some("POINT (25 25)"),   // row 2: matches poly 1
+            Some("POINT (45 45)"),   // row 3: matches poly 2
+            Some("POINT (5 5)"),     // row 4: matches poly 0
+            Some("POINT (200 200)"), // row 5: no match
+        ];
+        let probe_batch = create_probe_batch(probe_geoms);
+
+        // 1. Full-range query (0..6)
+        let mut full_positions = Vec::new();
+        let mut full_probe_indices = Vec::new();
+        let (full_metrics, _) = index
+            .query_batch(
+                &probe_batch,
+                0..6,
+                usize::MAX,
+                &mut full_positions,
+                &mut full_probe_indices,
+            )
+            .await
+            .unwrap();
+
+        // 2. Split into two subranges: (0..3) and (3..6) where range.start > 0
+        let mut split_positions = Vec::new();
+        let mut split_probe_indices = Vec::new();
+
+        let (m1, _) = index
+            .query_batch(
+                &probe_batch,
+                0..3,
+                usize::MAX,
+                &mut split_positions,
+                &mut split_probe_indices,
+            )
+            .await
+            .unwrap();
+        let (m2, _) = index
+            .query_batch(
+                &probe_batch,
+                3..6,
+                usize::MAX,
+                &mut split_positions,
+                &mut split_probe_indices,
+            )
+            .await
+            .unwrap();
+
+        // Compare split results with full-range results (P1 verification)
+        assert_eq!(
+            full_metrics.count,
+            m1.count + m2.count,
+            "Match count mismatch between full and split"
+        );
+        assert_eq!(
+            full_probe_indices, split_probe_indices,
+            "Probe indices mismatch for sliced range"
+        );
+        assert_eq!(
+            full_positions, split_positions,
+            "Build positions mismatch for sliced range"
+        );
     }
 }

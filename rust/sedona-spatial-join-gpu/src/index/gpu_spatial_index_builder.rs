@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use crate::backend::{PlatformSpatialIndex, PlatformSpatialRefiner};
 use crate::index::gpu_spatial_index::GPUSpatialIndex;
 use crate::options::GpuOptions;
 use arrow::array::BooleanBufferBuilder;
@@ -28,7 +29,6 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use sedona_common::{sedona_internal_err, SpatialJoinOptions};
 use sedona_expr::statistics::GeoStatistics;
-use sedona_libgpuspatial::{GpuSpatialIndex, GpuSpatialOptions, GpuSpatialRefiner};
 use sedona_spatial_join::evaluated_batch::evaluated_batch_stream::SendableEvaluatedBatchStream;
 use sedona_spatial_join::evaluated_batch::EvaluatedBatch;
 use sedona_spatial_join::index::spatial_index::SpatialIndexRef;
@@ -36,14 +36,17 @@ use sedona_spatial_join::index::spatial_index_builder::{
     SpatialIndexBuilder, SpatialJoinBuildMetrics,
 };
 use sedona_spatial_join::operand_evaluator::EvaluatedGeometryArray;
+use sedona_spatial_join::refine::IndexQueryResultRefinerFactory;
 use sedona_spatial_join::utils::join_utils::need_produce_result_in_final;
 use sedona_spatial_join::SpatialPredicate;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use wkb::reader::GeometryType;
 
 pub(crate) struct GPUSpatialIndexBuilder {
     schema: SchemaRef,
     spatial_predicate: SpatialPredicate,
+    options: SpatialJoinOptions,
     gpu_options: GpuOptions,
     join_type: JoinType,
     probe_threads_count: usize,
@@ -51,6 +54,7 @@ pub(crate) struct GPUSpatialIndexBuilder {
     /// Batches to be indexed
     indexed_batches: Vec<EvaluatedBatch>,
     /// Statistics for indexed geometries
+    stats: GeoStatistics,
     memory_used: usize,
 }
 
@@ -58,6 +62,7 @@ impl GPUSpatialIndexBuilder {
     pub fn new(
         schema: SchemaRef,
         spatial_predicate: SpatialPredicate,
+        options: SpatialJoinOptions,
         gpu_options: GpuOptions,
         join_type: JoinType,
         probe_threads_count: usize,
@@ -66,11 +71,13 @@ impl GPUSpatialIndexBuilder {
         Self {
             schema,
             spatial_predicate,
+            options,
             gpu_options,
             join_type,
             probe_threads_count,
             metrics,
             indexed_batches: vec![],
+            stats: GeoStatistics::empty(),
             memory_used: 0,
         }
     }
@@ -152,6 +159,7 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             let visited_build_side = self.build_visited_bitmaps()?;
             return Ok(Arc::new(GPUSpatialIndex::empty(
                 self.spatial_predicate.clone(),
+                self.options.clone(),
                 self.schema.clone(),
                 self.gpu_options.clone(),
                 visited_build_side,
@@ -159,21 +167,15 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             )?));
         }
         let build_timer = self.metrics.build_time.timer();
-        let gpu_options = GpuSpatialOptions {
-            cuda_use_memory_pool: self.gpu_options.use_memory_pool,
-            cuda_memory_pool_init_percent: self.gpu_options.memory_pool_init_percentage as i32,
-            concurrency: self.probe_threads_count as u32,
-            device_id: self.gpu_options.device_id as i32,
-            compress_bvh: self.gpu_options.compress_bvh,
-            pipeline_batches: self.gpu_options.pipeline_batches as u32,
-        };
 
-        let mut index = GpuSpatialIndex::try_new(&gpu_options).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to initialize GPU Index: {e:?}"))
-        })?;
-        let mut refiner = GpuSpatialRefiner::try_new(&gpu_options).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to initialize GPU Refiner: {e:?}"))
-        })?;
+        let mut index = PlatformSpatialIndex::try_new_with_concurrency(
+            &self.gpu_options,
+            self.probe_threads_count as u32,
+        )?;
+        let mut refiner = PlatformSpatialRefiner::try_new_with_concurrency(
+            &self.gpu_options,
+            self.probe_threads_count as u32,
+        )?;
 
         // Concat indexed batches into a single batch to reduce build time
         let total_rows: usize = self
@@ -181,6 +183,15 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             .iter()
             .map(|batch| batch.batch.num_rows())
             .sum();
+
+        let cpu_refiner_factory =
+            sedona_spatial_join::refine::DefaultIndexQueryResultRefinerFactory;
+        let cpu_refiner = cpu_refiner_factory.create_refiner(
+            &self.spatial_predicate,
+            self.options.clone(),
+            total_rows,
+            self.stats.clone(),
+        )?;
 
         let sedona_type = self.indexed_batches[0].geom_array.sedona_type().clone();
 
@@ -237,16 +248,45 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             ))
         })?;
 
+        if matches!(
+            &self.spatial_predicate,
+            SpatialPredicate::Relation(rel) if rel.relation_type == sedona_spatial_join::spatial_predicate::SpatialRelationType::Intersects
+        ) {
+            let mut valid_polygons = 0;
+            for batch in &self.indexed_batches {
+                for i in 0..batch.batch.num_rows() {
+                    if let Some(wkb) = batch.geom_array.wkb(i) {
+                        if matches!(
+                            wkb.geometry_type(),
+                            GeometryType::Polygon | GeometryType::MultiPolygon
+                        ) {
+                            valid_polygons += 1;
+                        }
+                    }
+                }
+            }
+            if valid_polygons == 0 {
+                log::warn!(
+                    "GPU spatial join for Intersects built with 0 valid polygon records; candidate pairs will fall back to CPU refiner"
+                );
+            }
+        }
+
         index.finish_building().map_err(|e| {
             DataFusionError::Execution(format!("Failed to build spatial index on GPU {e:?}"))
         })?;
         build_timer.done();
+
+        self.memory_used += index.get_index_mem_usage() + refiner.get_refiner_mem_usage();
+        self.metrics.build_mem_used.set_max(self.memory_used);
+
         let visited_build_side = self.build_visited_bitmaps()?;
         // Build index for rectangle queries
         Ok(Arc::new(GPUSpatialIndex {
             schema: self.schema.clone(),
             index: Arc::new(index),
             refiner: Arc::new(refiner),
+            cpu_refiner,
             spatial_predicate: self.spatial_predicate.clone(),
             indexed_batches: self
                 .indexed_batches
@@ -255,14 +295,16 @@ impl SpatialIndexBuilder for GPUSpatialIndexBuilder {
             data_id_to_batch_pos,
             visited_build_side,
             probe_threads_counter: AtomicUsize::new(self.probe_threads_count),
+            build_metrics: self.metrics.clone(),
         }))
     }
 
     async fn add_stream(
         &mut self,
         mut stream: SendableEvaluatedBatchStream,
-        _geo_statistics: GeoStatistics,
+        geo_statistics: GeoStatistics,
     ) -> Result<()> {
+        self.stats.merge(&geo_statistics);
         while let Some(batch) = stream.next().await {
             let indexed_batch = batch?;
             self.add_batch(indexed_batch)?;

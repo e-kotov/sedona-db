@@ -117,7 +117,7 @@ pub mod geos;
 pub mod tg;
 
 #[derive(Debug)]
-pub(crate) struct DefaultIndexQueryResultRefinerFactory;
+pub struct DefaultIndexQueryResultRefinerFactory;
 
 impl IndexQueryResultRefinerFactory for DefaultIndexQueryResultRefinerFactory {
     fn create_refiner(
