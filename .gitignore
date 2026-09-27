@@ -58,3 +58,4 @@ dev/release/.env
 # Local development and experiments
 private/
 c/sedona-metalspatial/poc_metal
+.claude/
